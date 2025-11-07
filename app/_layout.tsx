@@ -3,7 +3,26 @@ import { StatusBar } from 'expo-status-bar';
 import { Platform } from 'react-native';
 import { useEffect } from 'react';
 
+import { Stack } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import { Platform } from 'react-native';
+import { useEffect } from 'react';
+
 export default function RootLayout() {
+  // Web-specific: Handle base path routing for GitHub Pages
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      // Ensure we're at the correct base path
+      const basePath = '/vex_mix_match';
+      const currentPath = window.location.pathname;
+      
+      // If we're at /vex_mix_match without trailing slash, redirect to /
+      if (currentPath === basePath) {
+        window.history.replaceState(null, '', basePath + '/');
+      }
+    }
+  }, []);
+  
   // Web-specific: Catch className.split errors from React Native Web
   useEffect(() => {
     if (Platform.OS === 'web') {

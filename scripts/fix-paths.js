@@ -29,18 +29,23 @@ function fixPathsInFile(filePath) {
 
 function create404Redirect() {
   // Create a 404.html that redirects to index.html (GitHub Pages requirement)
+  // This handles all unmatched routes and redirects them to the app entry point
   const redirect404 = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>Redirecting...</title>
   <script>
-    // Redirect to base path
-    if (window.location.pathname === '/vex_mix_match/404.html' || 
-        window.location.pathname === '/vex_mix_match/404') {
-      window.location.replace('/vex_mix_match/');
+    // Get the base path from the current location
+    const basePath = '/vex_mix_match';
+    const currentPath = window.location.pathname;
+    
+    // If we're at the base path without trailing slash, add it
+    if (currentPath === basePath) {
+      window.location.replace(basePath + '/');
     } else {
-      window.location.replace('/vex_mix_match/');
+      // Otherwise redirect to base path
+      window.location.replace(basePath + '/');
     }
   </script>
   <meta http-equiv="refresh" content="0; url=/vex_mix_match/">
@@ -52,6 +57,24 @@ function create404Redirect() {
   
   fs.writeFileSync(path.join(distDir, '404.html'), redirect404, 'utf8');
   console.log('Created 404.html redirect');
+  
+  // Also create index.html redirect for the base path without trailing slash
+  // This ensures /vex_mix_match redirects to /vex_mix_match/
+  const indexPath = path.join(distDir, 'index.html');
+  let indexContent = fs.readFileSync(indexPath, 'utf8');
+  
+  // Add a script at the beginning to handle base path routing
+  const basePathScript = `<script>
+    // Ensure we're at the correct base path
+    if (window.location.pathname === '/vex_mix_match' && !window.location.pathname.endsWith('/')) {
+      window.location.replace('/vex_mix_match/');
+    }
+  </script>`;
+  
+  // Insert the script right after <head>
+  indexContent = indexContent.replace('<head>', `<head>${basePathScript}`);
+  fs.writeFileSync(indexPath, indexContent, 'utf8');
+  console.log('Added base path handling to index.html');
 }
 
 function fixPathsInDirectory(dir) {
