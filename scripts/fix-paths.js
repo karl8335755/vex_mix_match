@@ -91,6 +91,16 @@ function create404Redirect() {
         return;
       }
       
+      // CRITICAL: If we're at /vex_mix_match/, modify the pathname to / before Expo Router loads
+      // This makes Expo Router see / instead of /vex_mix_match/, so it matches the index route
+      if (currentPath === basePath + '/') {
+        // Use replaceState to change the pathname to / without reloading
+        // This happens BEFORE Expo Router reads window.location.pathname
+        window.history.replaceState(null, '', '/');
+        // Also set a flag so we know we modified the path
+        window.__EXPO_ROUTER_BASE_PATH_MODIFIED__ = true;
+      }
+      
       // Only redirect if we're not at root AND not at base path
       // This allows local testing at / to work, but redirects on GitHub Pages
       if (currentPath !== '/' && !currentPath.startsWith(basePath + '/')) {
