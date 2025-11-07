@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Mix & Match Route Planner",
-    "slug": "mix-match-route-planner",
+    "slug": "vex-iq-mixandmatch",
     "version": "1.0.0",
     "orientation": "landscape",
     "assetBundlePatterns": [
@@ -12,10 +12,6 @@
       "bundleIdentifier": "com.vex.mixmatchplanner"
     },
     "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
-      },
       "package": "com.vex.mixmatchplanner",
       "screenOrientation": "landscape"
     },
@@ -26,6 +22,15 @@
       "expo-router",
       "expo-asset"
     ],
-    "scheme": "mixmatch"
+    "scheme": "mixmatch",
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "78cc6030-1c2a-41b1-9ad7-f4cfcc9a10c8"
+      }
+    },
+    "owner": "karl8335755"
   }
 }
