@@ -7,15 +7,6 @@ export default function RootLayout() {
   const pathname = usePathname();
   const router = useRouter();
   
-import { Stack, usePathname, useRouter } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import { Platform } from 'react-native';
-import { useEffect } from 'react';
-
-export default function RootLayout() {
-  const pathname = usePathname();
-  const router = useRouter();
-  
   // Web-specific: Handle base path for GitHub Pages
   // Expo Router should handle basePath automatically, but if it doesn't match,
   // force redirect to root route
@@ -37,10 +28,6 @@ export default function RootLayout() {
       }
     }
   }, [pathname, router]);
-  
-  // Web-specific: Catch className.split errors from React Native Web
-  useEffect(() => {
-    if (Platform.OS === 'web') {
   
   // Web-specific: Catch className.split errors from React Native Web
   useEffect(() => {
