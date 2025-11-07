@@ -82,14 +82,20 @@ function create404Redirect() {
       const basePath = '/vex_mix_match';
       const currentPath = window.location.pathname;
       
-      // If we're at /vex_mix_match without trailing slash, redirect IMMEDIATELY
+      // Only redirect if we're NOT at root (/) - this handles GitHub Pages deployment
+      // If we're at root locally, don't redirect (for local testing)
+      // If we're at /vex_mix_match or /vex_mix_match/, we're on GitHub Pages
       if (currentPath === basePath) {
+        // At /vex_mix_match without trailing slash - redirect to /
         window.location.replace(basePath + '/');
         return;
       }
       
-      // If we're not at the base path at all, redirect IMMEDIATELY
-      if (!currentPath.startsWith(basePath + '/')) {
+      // Only redirect if we're not at root AND not at base path
+      // This allows local testing at / to work, but redirects on GitHub Pages
+      if (currentPath !== '/' && !currentPath.startsWith(basePath + '/')) {
+        // Not at root and not at base path - redirect to base path
+        // This handles cases where someone visits a wrong path on GitHub Pages
         window.location.replace(basePath + '/');
         return;
       }
