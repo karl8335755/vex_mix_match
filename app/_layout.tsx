@@ -1,14 +1,7 @@
-import { Stack } from 'expo-router';
+import { Stack, usePathname, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Platform } from 'react-native';
 import { useEffect } from 'react';
-import { usePathname, useRouter } from 'expo-router';
-
-import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import { Platform } from 'react-native';
-import { useEffect } from 'react';
-import { usePathname, useRouter } from 'expo-router';
 
 export default function RootLayout() {
   const pathname = usePathname();
@@ -30,10 +23,6 @@ export default function RootLayout() {
       }
     }
   }, [pathname, router]);
-  
-  // Web-specific: Catch className.split errors from React Native Web
-  useEffect(() => {
-    if (Platform.OS === 'web') {
   
   // Web-specific: Catch className.split errors from React Native Web
   useEffect(() => {
