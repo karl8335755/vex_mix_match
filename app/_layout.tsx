@@ -4,32 +4,9 @@ import { Platform } from 'react-native';
 import { useEffect } from 'react';
 
 export default function RootLayout() {
-  // Web-specific: Handle base path routing for GitHub Pages
-  // Note: The redirect script in index.html handles most cases before React loads
-  // This is a fallback that runs after React initializes
-  useEffect(() => {
-    if (Platform.OS === 'web') {
-      // Only redirect if we're not already at the correct path
-      // This prevents infinite redirect loops
-      const basePath = '/vex_mix_match';
-      const currentPath = window.location.pathname;
-      
-      // If we're at /vex_mix_match without trailing slash, redirect to /
-      if (currentPath === basePath) {
-        window.location.replace(basePath + '/');
-        return;
-      }
-      
-      // Ensure the router knows about the base path
-      // Expo Router should handle this automatically with basePath in app.json
-      if (!currentPath.startsWith(basePath + '/') && currentPath !== basePath) {
-        window.location.replace(basePath + '/');
-        return;
-      }
-    }
-  }, []);
-  
   // Web-specific: Catch className.split errors from React Native Web
+  // Note: Base path redirect is handled by the script in index.html before React loads
+  // This prevents hydration errors
   useEffect(() => {
     if (Platform.OS === 'web') {
       const originalErrorHandler = window.onerror;
