@@ -19,7 +19,11 @@
         "simulator": true
       },
       "android": {
-        "buildType": "apk"
+        "buildType": "apk",
+        "gradleCommand": ":app:assembleRelease"
+      },
+      "env": {
+        "EXPO_ANDROID_KOTLIN_VERSION": "1.9.25"
       }
     },
     "production": {}
