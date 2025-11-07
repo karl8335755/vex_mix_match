@@ -93,12 +93,18 @@ function create404Redirect() {
       
       // CRITICAL: If we're at /vex_mix_match/, modify the pathname to / before Expo Router loads
       // This makes Expo Router see / instead of /vex_mix_match/, so it matches the index route
+      // We use replaceState to change the pathname WITHOUT changing the full URL
+      // This way assets still load correctly (they use absolute paths with /vex_mix_match/)
       if (currentPath === basePath + '/') {
-        // Use replaceState to change the pathname to / without reloading
-        // This happens BEFORE Expo Router reads window.location.pathname
+        // Change the pathname to / so Expo Router matches the index route
+        // But keep the base path in the URL for asset loading
+        // Actually, we need to change it to / so Expo Router sees it correctly
+        // The assets will still work because they use absolute paths
+        const newUrl = window.location.origin + '/' + window.location.search + window.location.hash;
         window.history.replaceState(null, '', '/');
-        // Also set a flag so we know we modified the path
+        // Set a flag so we know we modified the path
         window.__EXPO_ROUTER_BASE_PATH_MODIFIED__ = true;
+        window.__EXPO_ROUTER_BASE_PATH__ = basePath;
       }
       
       // Only redirect if we're not at root AND not at base path
