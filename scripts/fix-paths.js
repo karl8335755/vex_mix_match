@@ -20,6 +20,17 @@ function fixPathsInFile(filePath) {
   content = content.replace(/url\("\/_expo\//g, `url("${basePath}/_expo/`);
   content = content.replace(/url\('\/_expo\//g, `url('${basePath}/_expo/`);
   
+  // Fix asset paths (images, fonts, etc.) in HTML attributes
+  content = content.replace(/src="\/assets\//g, `src="${basePath}/assets/`);
+  content = content.replace(/href="\/assets\//g, `href="${basePath}/assets/`);
+  content = content.replace(/url\("\/assets\//g, `url("${basePath}/assets/`);
+  content = content.replace(/url\('\/assets\//g, `url('${basePath}/assets/`);
+  
+  // Fix asset paths in JavaScript code (for require() and import statements)
+  // This fixes paths like: uri:"/assets/..." in JS bundles
+  content = content.replace(/uri:"\/assets\//g, `uri:"${basePath}/assets/`);
+  content = content.replace(/uri:'\/assets\//g, `uri:'${basePath}/assets/`);
+  
   // Fix router base path references
   content = content.replace(/\/vex_mix_match\/vex_mix_match\//g, '/vex_mix_match/');
   
@@ -58,8 +69,9 @@ function create404Redirect() {
   // This runs IMMEDIATELY before React/Expo Router initializes
   // Use synchronous check and immediate redirect
   const basePathScript = `<script>
+    // IMMEDIATE redirect - check synchronously before any other scripts run
+    // This prevents React hydration errors by redirecting before React loads
     (function() {
-      // IMMEDIATE redirect - check synchronously before any other scripts run
       const basePath = '/vex_mix_match';
       const currentPath = window.location.pathname;
       

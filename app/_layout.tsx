@@ -5,10 +5,12 @@ import { useEffect } from 'react';
 
 export default function RootLayout() {
   // Web-specific: Handle base path routing for GitHub Pages
-  // This runs AFTER the initial redirect script in index.html
+  // Note: The redirect script in index.html handles most cases before React loads
+  // This is a fallback that runs after React initializes
   useEffect(() => {
     if (Platform.OS === 'web') {
-      // Ensure we're at the correct base path
+      // Only redirect if we're not already at the correct path
+      // This prevents infinite redirect loops
       const basePath = '/vex_mix_match';
       const currentPath = window.location.pathname;
       
@@ -19,8 +21,7 @@ export default function RootLayout() {
       }
       
       // Ensure the router knows about the base path
-      // Expo Router should handle this automatically with basePath in app.json,
-      // but we ensure the path is correct here
+      // Expo Router should handle this automatically with basePath in app.json
       if (!currentPath.startsWith(basePath + '/') && currentPath !== basePath) {
         window.location.replace(basePath + '/');
         return;
