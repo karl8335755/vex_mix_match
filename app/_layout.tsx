@@ -3,8 +3,14 @@ import { StatusBar } from 'expo-status-bar';
 import { Platform } from 'react-native';
 import { useEffect } from 'react';
 
+import { Stack } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import { Platform } from 'react-native';
+import { useEffect } from 'react';
+
 export default function RootLayout() {
   // Web-specific: Handle base path routing for GitHub Pages
+  // This runs AFTER the initial redirect script in index.html
   useEffect(() => {
     if (Platform.OS === 'web') {
       // Ensure we're at the correct base path
@@ -13,14 +19,16 @@ export default function RootLayout() {
       
       // If we're at /vex_mix_match without trailing slash, redirect to /
       if (currentPath === basePath) {
-        window.history.replaceState(null, '', basePath + '/');
+        window.location.replace(basePath + '/');
+        return;
       }
       
       // Ensure the router knows about the base path
       // Expo Router should handle this automatically with basePath in app.json,
       // but we ensure the path is correct here
       if (!currentPath.startsWith(basePath + '/') && currentPath !== basePath) {
-        window.history.replaceState(null, '', basePath + '/');
+        window.location.replace(basePath + '/');
+        return;
       }
     }
   }, []);

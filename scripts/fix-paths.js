@@ -36,17 +36,8 @@ function create404Redirect() {
   <meta charset="utf-8">
   <title>Redirecting...</title>
   <script>
-    // Redirect to base path with trailing slash
-    const basePath = '/vex_mix_match';
-    const currentPath = window.location.pathname;
-    
-    // If we're at the base path without trailing slash, add it
-    if (currentPath === basePath) {
-      window.location.replace(basePath + '/');
-    } else {
-      // Otherwise redirect to base path
-      window.location.replace(basePath + '/');
-    }
+    // Immediate redirect - no delay
+    window.location.replace('/vex_mix_match/');
   </script>
   <meta http-equiv="refresh" content="0; url=/vex_mix_match/">
 </head>
@@ -63,21 +54,22 @@ function create404Redirect() {
   const indexPath = path.join(distDir, 'index.html');
   let indexContent = fs.readFileSync(indexPath, 'utf8');
   
-  // Add a script at the beginning to handle base path routing
-  // This runs before React/Expo Router initializes
+  // Add a script at the VERY beginning to handle base path routing
+  // This runs IMMEDIATELY before React/Expo Router initializes
+  // Use synchronous check and immediate redirect
   const basePathScript = `<script>
     (function() {
-      // Ensure we're at the correct base path before React loads
+      // IMMEDIATE redirect - check synchronously before any other scripts run
       const basePath = '/vex_mix_match';
       const currentPath = window.location.pathname;
       
-      // If we're at /vex_mix_match without trailing slash, redirect to /
+      // If we're at /vex_mix_match without trailing slash, redirect IMMEDIATELY
       if (currentPath === basePath) {
         window.location.replace(basePath + '/');
         return;
       }
       
-      // If we're not at the base path at all, redirect
+      // If we're not at the base path at all, redirect IMMEDIATELY
       if (!currentPath.startsWith(basePath + '/')) {
         window.location.replace(basePath + '/');
         return;
@@ -85,10 +77,15 @@ function create404Redirect() {
     })();
   </script>`;
   
-  // Insert the script right after <head>
-  indexContent = indexContent.replace('<head>', `<head>${basePathScript}`);
-  fs.writeFileSync(indexPath, indexContent, 'utf8');
-  console.log('Added base path handling to index.html');
+  // Insert the script right after <head> - this ensures it runs first
+  // Check if script already exists to avoid duplicates
+  if (!indexContent.includes('basePath = \'/vex_mix_match\'')) {
+    indexContent = indexContent.replace('<head>', `<head>${basePathScript}`);
+    fs.writeFileSync(indexPath, indexContent, 'utf8');
+    console.log('Added base path handling to index.html');
+  } else {
+    console.log('Base path script already exists in index.html');
+  }
 }
 
 function fixPathsInDirectory(dir) {
