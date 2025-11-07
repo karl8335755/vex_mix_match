@@ -1,6 +1,7 @@
 {
   "cli": {
-    "version": ">= 5.2.0"
+    "version": ">= 5.2.0",
+    "appVersionSource": "remote"
   },
   "build": {
     "development": {
@@ -19,11 +20,7 @@
         "simulator": true
       },
       "android": {
-        "buildType": "apk",
-        "gradleCommand": ":app:assembleRelease"
-      },
-      "env": {
-        "EXPO_ANDROID_KOTLIN_VERSION": "1.9.25"
+        "buildType": "apk"
       }
     },
     "production": {}
