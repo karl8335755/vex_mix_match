@@ -65,6 +65,13 @@ function create404Redirect() {
   const indexPath = path.join(distDir, 'index.html');
   let indexContent = fs.readFileSync(indexPath, 'utf8');
   
+  // Disable hydration to prevent React hydration errors
+  // This is safe for static exports since we're not doing SSR
+  indexContent = indexContent.replace(
+    /globalThis\.__EXPO_ROUTER_HYDRATE__=true/g,
+    'globalThis.__EXPO_ROUTER_HYDRATE__=false'
+  );
+  
   // Add a script at the VERY beginning to handle base path routing
   // This runs IMMEDIATELY before React/Expo Router initializes
   // Use synchronous check and immediate redirect
@@ -93,11 +100,10 @@ function create404Redirect() {
   // Check if script already exists to avoid duplicates
   if (!indexContent.includes('basePath = \'/vex_mix_match\'')) {
     indexContent = indexContent.replace('<head>', `<head>${basePathScript}`);
-    fs.writeFileSync(indexPath, indexContent, 'utf8');
-    console.log('Added base path handling to index.html');
-  } else {
-    console.log('Base path script already exists in index.html');
   }
+  
+  fs.writeFileSync(indexPath, indexContent, 'utf8');
+  console.log('Added base path handling to index.html and disabled hydration');
 }
 
 function fixPathsInDirectory(dir) {
