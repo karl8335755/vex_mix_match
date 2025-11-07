@@ -16,7 +16,8 @@
     },
     "web": {
       "bundler": "metro",
-      "output": "static"
+      "output": "static",
+      "basePath": "/vex_mix_match"
     },
     "plugins": [
       "expo-router",
