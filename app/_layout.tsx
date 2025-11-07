@@ -15,6 +15,13 @@ export default function RootLayout() {
       if (currentPath === basePath) {
         window.history.replaceState(null, '', basePath + '/');
       }
+      
+      // Ensure the router knows about the base path
+      // Expo Router should handle this automatically with basePath in app.json,
+      // but we ensure the path is correct here
+      if (!currentPath.startsWith(basePath + '/') && currentPath !== basePath) {
+        window.history.replaceState(null, '', basePath + '/');
+      }
     }
   }, []);
   

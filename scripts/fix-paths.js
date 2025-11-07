@@ -36,7 +36,7 @@ function create404Redirect() {
   <meta charset="utf-8">
   <title>Redirecting...</title>
   <script>
-    // Get the base path from the current location
+    // Redirect to base path with trailing slash
     const basePath = '/vex_mix_match';
     const currentPath = window.location.pathname;
     
@@ -64,11 +64,25 @@ function create404Redirect() {
   let indexContent = fs.readFileSync(indexPath, 'utf8');
   
   // Add a script at the beginning to handle base path routing
+  // This runs before React/Expo Router initializes
   const basePathScript = `<script>
-    // Ensure we're at the correct base path
-    if (window.location.pathname === '/vex_mix_match' && !window.location.pathname.endsWith('/')) {
-      window.location.replace('/vex_mix_match/');
-    }
+    (function() {
+      // Ensure we're at the correct base path before React loads
+      const basePath = '/vex_mix_match';
+      const currentPath = window.location.pathname;
+      
+      // If we're at /vex_mix_match without trailing slash, redirect to /
+      if (currentPath === basePath) {
+        window.location.replace(basePath + '/');
+        return;
+      }
+      
+      // If we're not at the base path at all, redirect
+      if (!currentPath.startsWith(basePath + '/')) {
+        window.location.replace(basePath + '/');
+        return;
+      }
+    })();
   </script>`;
   
   // Insert the script right after <head>

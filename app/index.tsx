@@ -257,6 +257,7 @@ export default function HomeScreen() {
     // Find all pins in the same stack (at the exact same position)
     // Also check if pin is on a beam hole - if so, move with beam
     const POSITION_TOLERANCE = 0.1;
+    const HOLE_SNAP_DISTANCE = 2.5; // Field units for snapping to beam holes
     const stackPins: Pin[] = [];
     
     if (pin) {
@@ -270,7 +271,8 @@ export default function HomeScreen() {
         }
       }
       
-      // Check if the NEW position corresponds to a beam hole
+      // Check if the NEW position is near a beam hole and snap to it
+      let snappedHolePosition: FieldPosition | null = null;
       let isMovingToBeamHole = false;
       for (const beam of beams) {
         const holeSpacing = 23.4375; // SVG units
@@ -295,13 +297,31 @@ export default function HomeScreen() {
           const holeFieldX = ((svgX - 60) / 1080) * 48;
           const holeFieldY = ((svgY - 40) / 760) * 48;
           
-          // Check NEW position against beam hole
+          // Check distance to beam hole
           const holeDx = Math.abs(holeFieldX - position.x);
           const holeDy = Math.abs(holeFieldY - position.y);
+          const distance = Math.sqrt(holeDx * holeDx + holeDy * holeDy);
           
-          if (holeDx < POSITION_TOLERANCE && holeDy < POSITION_TOLERANCE) {
-            isMovingToBeamHole = true;
-            break;
+          // If close enough to snap, check if hole is available
+          if (distance < HOLE_SNAP_DISTANCE) {
+            // Check if this hole already has a pin (excluding the pin being moved)
+            let holePinCount = 0;
+            for (const p of pins) {
+              if (p.id === id) continue; // Skip the pin being moved
+              const existingDx = Math.abs(p.position.x - holeFieldX);
+              const existingDy = Math.abs(p.position.y - holeFieldY);
+              if (existingDx < POSITION_TOLERANCE && existingDy < POSITION_TOLERANCE) {
+                holePinCount++;
+              }
+            }
+            
+            // Only snap if hole is empty
+            if (holePinCount === 0) {
+              snappedHolePosition = { x: holeFieldX, y: holeFieldY, rotation: 0 };
+              isMovingToBeamHole = true;
+              console.log(`📌 Pin snapped to beam hole at (${holeFieldX.toFixed(2)}, ${holeFieldY.toFixed(2)})`);
+              break;
+            }
           }
         }
         if (isMovingToBeamHole) break;
@@ -344,10 +364,21 @@ export default function HomeScreen() {
         if (isCurrentlyOnBeamHole) break;
       }
       
-      // If moving to a beam hole, allow stacking (pins can stack on beam holes)
+      // Use snapped position if moving to beam hole, otherwise use the provided position
+      const finalPosition = snappedHolePosition || position;
+      
+      // If moving to a beam hole, snap to exact hole position (don't stack with other pins)
       // If currently on a beam hole, don't move with other pins (it moves with the beam)
       // Otherwise, move all pins in the stack together
-      if (stackPins.length > 1 && !isCurrentlyOnBeamHole) {
+      if (isMovingToBeamHole) {
+        // Pin is snapping to a beam hole - move only this pin to the exact hole position
+        console.log(`📌 Pin attaching to beam hole at (${finalPosition.x.toFixed(2)}, ${finalPosition.y.toFixed(2)})`);
+        setPins(
+          pins.map((p) =>
+            p.id === id ? { ...p, position: finalPosition } : p
+          )
+        );
+      } else if (stackPins.length > 1 && !isCurrentlyOnBeamHole) {
         console.log(`📦 Moving ${stackPins.length} pins together as a stack`);
         setPins(
           pins.map((p) => {
@@ -355,16 +386,16 @@ export default function HomeScreen() {
             const isInStack = stackPins.some(sp => sp.id === p.id);
             if (isInStack) {
               // Move all pins in the stack to the new position
-              return { ...p, position };
+              return { ...p, position: finalPosition };
             }
             return p;
           })
         );
       } else {
-        // Single pin, pin moving to beam hole, or pin currently on beam hole - move normally
+        // Single pin or pin currently on beam hole - move normally
         setPins(
           pins.map((p) =>
-            p.id === id ? { ...p, position } : p
+            p.id === id ? { ...p, position: finalPosition } : p
           )
         );
       }

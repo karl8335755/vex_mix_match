@@ -27,7 +27,7 @@
     "scheme": "mixmatch",
     "extra": {
       "router": {
-        "origin": "https://karl8335755.github.io/vex_mix_match"
+        "origin": false
       },
       "eas": {
         "projectId": "78cc6030-1c2a-41b1-9ad7-f4cfcc9a10c8"
