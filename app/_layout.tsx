@@ -3,11 +3,6 @@ import { StatusBar } from 'expo-status-bar';
 import { Platform } from 'react-native';
 import { useEffect } from 'react';
 
-import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import { Platform } from 'react-native';
-import { useEffect } from 'react';
-
 export default function RootLayout() {
   // Web-specific: Handle base path routing for GitHub Pages
   useEffect(() => {
