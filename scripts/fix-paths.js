@@ -93,6 +93,12 @@ function create404Redirect() {
         window.location.replace(basePath + '/');
         return;
       }
+      
+      // Set base path for Expo Router before it initializes
+      // This ensures Expo Router knows about the base path
+      if (!window.__EXPO_ROUTER_BASE_PATH__) {
+        window.__EXPO_ROUTER_BASE_PATH__ = basePath;
+      }
     })();
   </script>`;
   
