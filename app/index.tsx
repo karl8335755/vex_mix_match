@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,8 @@ import {
   Platform,
   Dimensions,
   Modal,
+  PanResponder,
+  Switch,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -48,7 +50,10 @@ export default function HomeScreen() {
   const [layoutsMenuOpen, setLayoutsMenuOpen] = useState(false);
   const [isPortrait, setIsPortrait] = useState(false);
   const [uiVisible, setUiVisible] = useState(true);
+  const [pinSnapEnabled, setPinSnapEnabled] = useState(true);
   const [debugMessages, setDebugMessages] = useState<string[]>([]);
+  const [propertiesPanelPosition, setPropertiesPanelPosition] = useState<{ x: number; y: number } | null>(null);
+  const isDebugBuild = __DEV__ || Platform.OS === 'web';
 
   useEffect(() => {
     loadData();
@@ -201,13 +206,31 @@ export default function HomeScreen() {
   };
 
   const addPin = (position?: FieldPosition, color?: PinColor) => {
+    // If no position provided, use starting position with spacing
+    let startPosition: FieldPosition;
+    if (position) {
+      startPosition = position;
+    } else {
+      // Use starting position from field config (8, 8) with spacing for multiple pins
+      const START_X = 8;
+      const START_Y = 8;
+      const SPACING = 2.5; // Field units between pins
+      
+      // Count existing pins to determine offset
+      const existingPinCount = pins.length;
+      const row = Math.floor(existingPinCount / 5); // 5 pins per row
+      const col = existingPinCount % 5;
+      
+      startPosition = {
+        x: START_X + (col * SPACING),
+        y: START_Y + (row * SPACING),
+        rotation: 0,
+      };
+    }
+    
     const newPin: Pin = {
       id: generateId(),
-      position: position || {
-        x: Math.random() * 48,
-        y: Math.random() * 48,
-        rotation: 0,
-      },
+      position: startPosition,
       color: color || selectedPinColor,
     };
     console.log('➕ Pin added:', {
@@ -247,84 +270,121 @@ export default function HomeScreen() {
 
   const handlePinMove = (id: string, position: FieldPosition) => {
     const pin = pins.find(p => p.id === id);
+    if (!pin) {
+      console.error('❌ Pin not found:', id);
+      return;
+    }
+    
+    const safeX = Number.isFinite(position.x) ? position.x : pin.position.x;
+    const safeY = Number.isFinite(position.y) ? position.y : pin.position.y;
+    const safeRotation = Number.isFinite(position.rotation) ? position.rotation : (pin.position.rotation ?? 0);
+    
+    if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) {
+      console.warn('⚠️ Received non-finite pin position, falling back to pin\'s current position', position);
+    }
+    
+    // Clamp position to field bounds
+    const FIELD_WIDTH = 48;
+    const FIELD_HEIGHT = 48;
+    const clampedPosition: FieldPosition = {
+      x: Math.max(0, Math.min(FIELD_WIDTH, safeX)),
+      y: Math.max(0, Math.min(FIELD_HEIGHT, safeY)),
+      rotation: safeRotation || 0,
+    };
+    
     console.log('↔️ Pin moved:', {
       id,
-      color: pin?.color,
-      oldPosition: pin ? { x: pin.position.x.toFixed(2), y: pin.position.y.toFixed(2) } : null,
-      newPosition: { x: position.x.toFixed(2), y: position.y.toFixed(2), rotation: position.rotation },
+      color: pin.color,
+      oldPosition: { x: pin.position.x.toFixed(2), y: pin.position.y.toFixed(2) },
+      newPosition: { x: clampedPosition.x.toFixed(2), y: clampedPosition.y.toFixed(2), rotation: clampedPosition.rotation },
     });
     
     // Find all pins in the same stack (at the exact same position)
     // Also check if pin is on a beam hole - if so, move with beam
     const POSITION_TOLERANCE = 0.1;
     const HOLE_SNAP_DISTANCE = 2.5; // Field units for snapping to beam holes
+    const PIN_SNAP_DISTANCE = 2.5; // Field units for snapping pins together
     const stackPins: Pin[] = [];
     
     if (pin) {
       // Find all pins at the same position as the pin being moved (using OLD position for stack detection)
-      for (const p of pins) {
-        const dx = Math.abs(p.position.x - pin.position.x);
-        const dy = Math.abs(p.position.y - pin.position.y);
-        
-        if (dx < POSITION_TOLERANCE && dy < POSITION_TOLERANCE) {
-          stackPins.push(p);
+      // Only if snap is enabled globally AND this pin is snappable
+      const isPinSnappable = pin.snappable !== false;
+      if (pinSnapEnabled && isPinSnappable) {
+        for (const p of pins) {
+          // Only stack with other snappable pins
+          const isTargetPinSnappable = p.snappable !== false;
+          if (!isTargetPinSnappable) continue;
+          
+          const dx = Math.abs(p.position.x - pin.position.x);
+          const dy = Math.abs(p.position.y - pin.position.y);
+          
+          if (dx < POSITION_TOLERANCE && dy < POSITION_TOLERANCE) {
+            stackPins.push(p);
+          }
         }
       }
       
-      // Check if the NEW position is near a beam hole and snap to it
+      // Check if the NEW position is near a beam hole and snap to it (only if pin is snappable)
       let snappedHolePosition: FieldPosition | null = null;
       let isMovingToBeamHole = false;
-      for (const beam of beams) {
-        const holeSpacing = 23.4375; // SVG units
-        const beamCenterSvgX = (beam.position.x / 48) * 1080 + 60;
-        const beamCenterSvgY = (beam.position.y / 48) * 760 + 40;
-        const rotation = beam.rotation || 0;
-        const rotationRad = (rotation * Math.PI) / 180;
-        
-        const localHoles = [
-          { x: -holeSpacing, y: 0 },
-          { x: 0, y: 0 },
-          { x: holeSpacing, y: 0 },
-        ];
-        
-        for (const localHole of localHoles) {
-          const rotatedX = localHole.x * Math.cos(rotationRad) - localHole.y * Math.sin(rotationRad);
-          const rotatedY = localHole.x * Math.sin(rotationRad) + localHole.y * Math.cos(rotationRad);
+      if (isPinSnappable) {
+        for (const beam of beams) {
+          // Check if beam allows snapping (defaults to true)
+          const isBeamSnappable = beam.snappable !== false;
+          if (!isBeamSnappable) continue;
           
-          const svgX = beamCenterSvgX + rotatedX;
-          const svgY = beamCenterSvgY + rotatedY;
+          const holeSpacing = 23.4375; // SVG units
+          const beamCenterSvgX = (beam.position.x / 48) * 1080 + 60;
+          const beamCenterSvgY = (beam.position.y / 48) * 760 + 40;
+          const rotation = beam.rotation || 0;
+          const rotationRad = (rotation * Math.PI) / 180;
           
-          const holeFieldX = ((svgX - 60) / 1080) * 48;
-          const holeFieldY = ((svgY - 40) / 760) * 48;
+          const localHoles = [
+            { x: -holeSpacing, y: 0 },
+            { x: 0, y: 0 },
+            { x: holeSpacing, y: 0 },
+          ];
           
-          // Check distance to beam hole
-          const holeDx = Math.abs(holeFieldX - position.x);
-          const holeDy = Math.abs(holeFieldY - position.y);
-          const distance = Math.sqrt(holeDx * holeDx + holeDy * holeDy);
-          
-          // If close enough to snap, check if hole is available
-          if (distance < HOLE_SNAP_DISTANCE) {
-            // Check if this hole already has a pin (excluding the pin being moved)
-            let holePinCount = 0;
-            for (const p of pins) {
-              if (p.id === id) continue; // Skip the pin being moved
-              const existingDx = Math.abs(p.position.x - holeFieldX);
-              const existingDy = Math.abs(p.position.y - holeFieldY);
-              if (existingDx < POSITION_TOLERANCE && existingDy < POSITION_TOLERANCE) {
-                holePinCount++;
+          for (const localHole of localHoles) {
+            const rotatedX = localHole.x * Math.cos(rotationRad) - localHole.y * Math.sin(rotationRad);
+            const rotatedY = localHole.x * Math.sin(rotationRad) + localHole.y * Math.cos(rotationRad);
+            
+            const svgX = beamCenterSvgX + rotatedX;
+            const svgY = beamCenterSvgY + rotatedY;
+            
+            const holeFieldX = ((svgX - 60) / 1080) * 48;
+            const holeFieldY = ((svgY - 40) / 760) * 48;
+            
+            // Check distance to beam hole
+            const holeDx = Math.abs(holeFieldX - clampedPosition.x);
+            const holeDy = Math.abs(holeFieldY - clampedPosition.y);
+            const distance = Math.sqrt(holeDx * holeDx + holeDy * holeDy);
+            
+            // If close enough to snap, check if hole is available
+            if (distance < HOLE_SNAP_DISTANCE) {
+              // Check if this hole already has a pin (excluding the pin being moved)
+              let holePinCount = 0;
+              for (const p of pins) {
+                if (p.id === id) continue; // Skip the pin being moved
+                const existingDx = Math.abs(p.position.x - holeFieldX);
+                const existingDy = Math.abs(p.position.y - holeFieldY);
+                if (existingDx < POSITION_TOLERANCE && existingDy < POSITION_TOLERANCE) {
+                  holePinCount++;
+                }
+              }
+              
+              // Only snap if hole is empty
+              if (holePinCount === 0) {
+                snappedHolePosition = { x: holeFieldX, y: holeFieldY, rotation: 0 };
+                isMovingToBeamHole = true;
+                console.log(`📌 Pin snapped to beam hole at (${holeFieldX.toFixed(2)}, ${holeFieldY.toFixed(2)})`);
+                break;
               }
             }
-            
-            // Only snap if hole is empty
-            if (holePinCount === 0) {
-              snappedHolePosition = { x: holeFieldX, y: holeFieldY, rotation: 0 };
-              isMovingToBeamHole = true;
-              console.log(`📌 Pin snapped to beam hole at (${holeFieldX.toFixed(2)}, ${holeFieldY.toFixed(2)})`);
-              break;
-            }
           }
+          if (isMovingToBeamHole) break;
         }
-        if (isMovingToBeamHole) break;
       }
       
       // Check if pin is CURRENTLY on a beam hole (using OLD position)
@@ -364,8 +424,8 @@ export default function HomeScreen() {
         if (isCurrentlyOnBeamHole) break;
       }
       
-      // Use snapped position if moving to beam hole, otherwise use the provided position
-      const finalPosition = snappedHolePosition || position;
+      // Use snapped position if moving to beam hole, otherwise use the clamped position
+      const finalPosition = snappedHolePosition || clampedPosition;
       
       // If moving to a beam hole, snap to exact hole position (don't stack with other pins)
       // If currently on a beam hole, don't move with other pins (it moves with the beam)
@@ -378,7 +438,8 @@ export default function HomeScreen() {
             p.id === id ? { ...p, position: finalPosition } : p
           )
         );
-      } else if (stackPins.length > 1 && !isCurrentlyOnBeamHole) {
+      } else if (stackPins.length > 1 && !isCurrentlyOnBeamHole && pinSnapEnabled) {
+        // Move all pins in the stack together (only if snap is enabled)
         console.log(`📦 Moving ${stackPins.length} pins together as a stack`);
         setPins(
           pins.map((p) => {
@@ -392,20 +453,13 @@ export default function HomeScreen() {
           })
         );
       } else {
-        // Single pin or pin currently on beam hole - move normally
+        // Single pin, snap disabled, or pin currently on beam hole - move normally
         setPins(
           pins.map((p) =>
             p.id === id ? { ...p, position: finalPosition } : p
           )
         );
       }
-    } else {
-      // Pin not found, move normally
-      setPins(
-        pins.map((p) =>
-          p.id === id ? { ...p, position } : p
-        )
-      );
     }
   };
 
@@ -426,20 +480,36 @@ export default function HomeScreen() {
       return;
     }
     
+    // If no position provided, use starting position with spacing
+    let startPosition: FieldPosition;
+    if (position) {
+      startPosition = position;
+    } else {
+      // Use starting position from field config (40, 8) with spacing for multiple beams
+      const START_X = 40;
+      const START_Y = 8;
+      const SPACING = 5; // Field units between beams
+      
+      // Count existing beams to determine offset
+      const existingBeamCount = beams.length;
+      
+      startPosition = {
+        x: START_X,
+        y: START_Y + (existingBeamCount * SPACING),
+        rotation: 0,
+      };
+    }
+    
     const newBeam: Beam = {
       id: generateId(),
-      position: position || {
-        x: 24,
-        y: 24,
-        rotation: 0,
-      },
+      position: startPosition,
       rotation: 0,
     };
     
     // Validate position values
     if (isNaN(newBeam.position.x) || isNaN(newBeam.position.y)) {
-      newBeam.position.x = 24;
-      newBeam.position.y = 24;
+      newBeam.position.x = 40;
+      newBeam.position.y = 8;
     }
     
     setBeams([...beams, newBeam]);
@@ -569,17 +639,174 @@ export default function HomeScreen() {
 
 
   const handlePinClick = (id: string, pin: Pin) => {
-    setSelectedPinId(id); // Set selected pin
-    console.log('👆 Pin clicked:', {
+    setSelectedPinId(id);
+    setSelectedBeamId(null); // Clear beam selection
+    console.log('👆 Pin selected:', {
       id,
       color: pin.color,
-      position: { x: pin.position.x.toFixed(2), y: pin.position.y.toFixed(2), rotation: pin.position.rotation },
+      position: { x: pin.position.x.toFixed(2), y: pin.position.y.toFixed(2) },
+      snappable: pin.snappable ?? true,
     });
-    Alert.alert(
-      'Pin Clicked',
-      `Pin ID: ${id}\nColor: ${pin.color}\nPosition: (${pin.position.x.toFixed(1)}, ${pin.position.y.toFixed(1)})`,
-      [{ text: 'OK' }]
-    );
+  };
+
+  const handleBeamClick = (id: string, beam: Beam) => {
+    setSelectedBeamId(id);
+    setSelectedPinId(null); // Clear pin selection
+    console.log('👆 Beam selected:', {
+      id,
+      position: { x: beam.position.x.toFixed(2), y: beam.position.y.toFixed(2) },
+      snappable: beam.snappable ?? true,
+    });
+  };
+
+  const handleClearSelection = () => {
+    setSelectedPinId(null);
+    setSelectedBeamId(null);
+    setPropertiesPanelPosition(null); // Reset position when closing
+  };
+
+  // Properties panel drag handler
+  const propertiesPanelDragRef = useRef({ startX: 0, startY: 0, currentX: 0, currentY: 0 });
+  const propertiesPanelRef = useRef<View>(null);
+  
+  const propertiesPanelPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (evt, gestureState) => {
+        // Only respond to drags on the header area
+        return Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5;
+      },
+      onPanResponderGrant: (evt) => {
+        const { pageX, pageY } = evt.nativeEvent;
+        const currentPos = propertiesPanelPosition || { x: 0, y: 0 };
+        propertiesPanelDragRef.current = {
+          startX: pageX,
+          startY: pageY,
+          currentX: currentPos.x,
+          currentY: currentPos.y,
+        };
+      },
+      onPanResponderMove: (evt, gestureState) => {
+        const { currentX, currentY } = propertiesPanelDragRef.current;
+        const newX = currentX + gestureState.dx;
+        const newY = currentY + gestureState.dy;
+        
+        // Get screen dimensions to constrain movement
+        const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
+        const panelWidth = 140;
+        const panelHeight = 200; // Approximate height
+        
+        // Constrain to screen bounds
+        const constrainedX = Math.max(0, Math.min(newX, screenWidth - panelWidth));
+        const constrainedY = Math.max(0, Math.min(newY, screenHeight - panelHeight));
+        
+        // Update ref for next move
+        propertiesPanelDragRef.current.currentX = constrainedX;
+        propertiesPanelDragRef.current.currentY = constrainedY;
+        
+        setPropertiesPanelPosition({ x: constrainedX, y: constrainedY });
+      },
+      onPanResponderRelease: () => {
+        // Position is already set in onPanResponderMove
+      },
+    })
+  ).current;
+
+  const togglePinSnappable = (id: string) => {
+    setPins(pins.map(p => 
+      p.id === id 
+        ? { ...p, snappable: p.snappable === false ? true : false }
+        : p
+    ));
+  };
+
+  // Initialize properties panel position when it first appears
+  useEffect(() => {
+    if ((selectedPinId || selectedBeamId) && !propertiesPanelPosition && propertiesPanelRef.current) {
+      // Use setTimeout to ensure the panel is rendered before measuring
+      setTimeout(() => {
+        if (propertiesPanelRef.current) {
+          propertiesPanelRef.current.measure((x, y, width, height, pageX: number, pageY: number) => {
+            setPropertiesPanelPosition({ x: pageX, y: pageY });
+          });
+        }
+      }, 100);
+    }
+  }, [selectedPinId, selectedBeamId, propertiesPanelPosition]);
+
+  const toggleBeamSnappable = (id: string) => {
+    setBeams(beams.map(b => 
+      b.id === id 
+        ? { ...b, snappable: b.snappable === false ? true : false }
+        : b
+    ));
+  };
+
+  const togglePinVisibility = (id: string) => {
+    setPins(pins.map(p => 
+      p.id === id 
+        ? { ...p, visible: p.visible === false ? true : false }
+        : p
+    ));
+  };
+
+  const toggleBeamVisibility = (id: string) => {
+    setBeams(beams.map(b => 
+      b.id === id 
+        ? { ...b, visible: b.visible === false ? true : false }
+        : b
+    ));
+  };
+
+  const handlePinLongPress = (id: string, pin: Pin) => {
+    console.log('🔘 Long-press handler called for pin:', {
+      id,
+      color: pin.color,
+      position: { x: pin.position.x.toFixed(2), y: pin.position.y.toFixed(2) },
+    });
+    
+    // Find all pins in the same stack (at the exact same position)
+    const POSITION_TOLERANCE = 0.1;
+    const stackPins: Pin[] = [];
+    
+    for (const p of pins) {
+      const dx = Math.abs(p.position.x - pin.position.x);
+      const dy = Math.abs(p.position.y - pin.position.y);
+      
+      if (dx < POSITION_TOLERANCE && dy < POSITION_TOLERANCE) {
+        stackPins.push(p);
+      }
+    }
+    
+    console.log(`📦 Found ${stackPins.length} pins in stack`);
+    
+    // Only unstack if there are multiple pins
+    if (stackPins.length <= 1) {
+      console.log('⚠️ Only one pin in stack, nothing to unstack');
+      return;
+    }
+    
+    // Spread pins horizontally side by side
+    const SPACING = 2.5; // Field units between pins
+    const startX = pin.position.x - ((stackPins.length - 1) * SPACING) / 2;
+    
+    const updatedPins = pins.map(p => {
+      const stackIndex = stackPins.findIndex(sp => sp.id === p.id);
+      if (stackIndex >= 0) {
+        return {
+          ...p,
+          position: {
+            ...p.position,
+            x: startX + (stackIndex * SPACING),
+            y: pin.position.y, // Keep same Y position
+          },
+        };
+      }
+      return p;
+    });
+    
+    setPins(updatedPins);
+    console.log(`📦 Unstacked ${stackPins.length} pins side by side`);
   };
 
   // Helper function to log all current pins (can be called from console)
@@ -647,12 +874,7 @@ export default function HomeScreen() {
       setBeams(defaultLayout.beams);
       setSelectedLayoutId(TEAM_MATCH_DEFAULT_LAYOUT_ID);
       
-      // Show success message
-      if (Platform.OS === 'web') {
-        alert(`✅ Loaded Team Match Default\n${defaultLayout.pins.length} pins • ${defaultLayout.beams.length} beams`);
-      } else {
-        Alert.alert('Success', `Loaded Team Match Default\n${defaultLayout.pins.length} pins • ${defaultLayout.beams.length} beams`);
-      }
+      console.log(`✅ Loaded Team Match Default layout with ${defaultLayout.pins.length} pins and ${defaultLayout.beams.length} beams`);
     } catch (error) {
       console.error('❌ Error loading Team Match Default layout:', error);
       Alert.alert('Error', 'Failed to load Team Match Default layout');
@@ -876,7 +1098,7 @@ export default function HomeScreen() {
       setPins(defaultLayout.pins);
       setBeams(defaultLayout.beams);
       setSelectedLayoutId(TEAM_MATCH_DEFAULT_LAYOUT_ID);
-      Alert.alert('Success', `Loaded layout: ${layout.name}`);
+      console.log(`✅ Loaded layout: ${layout.name} (Team Match Default)`);
       return;
     }
     
@@ -884,7 +1106,7 @@ export default function HomeScreen() {
     setPins(layout.pins);
     setBeams(layout.beams);
     setSelectedLayoutId(layout.id);
-    Alert.alert('Success', `Loaded layout: ${layout.name}`);
+    console.log(`✅ Loaded layout: ${layout.name}`);
   };
 
   const deleteFieldLayout = async (id: string) => {
@@ -954,7 +1176,7 @@ export default function HomeScreen() {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.container}>
+      <SafeAreaView style={styles.container} edges={['top']}>
         <View style={styles.center}>
           <Text>Loading...</Text>
         </View>
@@ -972,29 +1194,42 @@ export default function HomeScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top']}>
       {/* Main Field View - Takes up most of the screen */}
       <View style={styles.fieldContainer}>
         {/* Floating Hamburger Button - Always visible */}
         {!isPortrait && (
-          <TouchableOpacity
-            style={styles.floatingHamburger}
-            onPress={() => setUiVisible(!uiVisible)}
-          >
-            {uiVisible ? (
-              <Svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                <Path
-                  d="M15 18L9 12L15 6"
-                  stroke="#fff"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </Svg>
-            ) : (
-              <Text style={styles.floatingHamburgerText}>☰</Text>
+          <View style={styles.hamburgerAndLayoutRow}>
+            <TouchableOpacity
+              style={styles.floatingHamburger}
+              onPress={() => setUiVisible(!uiVisible)}
+            >
+              {uiVisible ? (
+                <Svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                  <Path
+                    d="M15 18L9 12L15 6"
+                    stroke="#fff"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </Svg>
+              ) : (
+                <Text style={styles.floatingHamburgerText}>☰</Text>
+              )}
+            </TouchableOpacity>
+            {uiVisible && (
+              <View style={styles.layoutNameLandscape}>
+                <Text style={styles.layoutNameTextLandscape}>
+                  {selectedLayoutId === TEAM_MATCH_DEFAULT_LAYOUT_ID
+                    ? 'Team Match Default'
+                    : selectedLayoutId
+                    ? fieldLayouts.find(l => l.id === selectedLayoutId)?.name || 'Custom Layout'
+                    : 'Default Layout'}
+                </Text>
+              </View>
             )}
-          </TouchableOpacity>
+          </View>
         )}
 
         {/* Compact Header - Toggleable */}
@@ -1004,6 +1239,19 @@ export default function HomeScreen() {
             isPortrait && styles.compactHeaderPortrait,
           ]}>
             <Text style={styles.compactTitle}>Mix & Match Planner</Text>
+          </View>
+        )}
+
+        {/* Current Layout Name */}
+        {uiVisible && isPortrait && (
+          <View style={styles.layoutNameBar}>
+            <Text style={styles.layoutNameText}>
+              {selectedLayoutId === TEAM_MATCH_DEFAULT_LAYOUT_ID
+                ? 'Team Match Default'
+                : selectedLayoutId
+                ? fieldLayouts.find(l => l.id === selectedLayoutId)?.name || 'Custom Layout'
+                : 'Default Layout'}
+            </Text>
           </View>
         )}
 
@@ -1033,11 +1281,15 @@ export default function HomeScreen() {
               onPinMove={handlePinMove}
               onPinRemove={removePin}
               onPinClick={handlePinClick}
+              onPinLongPress={handlePinLongPress}
               onPinToggleHighlight={togglePinHighlight}
+              pinSnapEnabled={pinSnapEnabled}
               onBeamAdd={addBeam}
               onBeamMove={handleBeamMove}
               onBeamRemove={removeBeam}
+              onBeamClick={handleBeamClick}
               onBeamToggleHighlight={toggleBeamHighlight}
+              onClearSelection={handleClearSelection}
             />
           </View>
         </View>
@@ -1123,8 +1375,10 @@ export default function HomeScreen() {
         {/* Floating Controls - Landscape mode (left side) */}
         {uiVisible && !isPortrait && (
           <View style={styles.floatingControls}>
-            {/* Column 1: Pin/Beam Buttons */}
-            <View style={styles.pinColorGroup}>
+            {/* Buttons Row */}
+            <View style={styles.landscapeButtonsRow}>
+              {/* Column 1: Pin/Beam Buttons */}
+              <View style={styles.pinColorGroup}>
               {Object.values(PinColor).map((color) => {
                 const colorCount = pins.filter(p => p.color === color).length;
                 let maxCount = 0;
@@ -1173,7 +1427,7 @@ export default function HomeScreen() {
                 <Text style={styles.floatingColorCount}>{beams.length}/2</Text>
               </TouchableOpacity>
             </View>
-
+            
             {/* Column 2: Action Buttons */}
             <View style={styles.actionGroup}>
               <TouchableOpacity
@@ -1272,7 +1526,7 @@ export default function HomeScreen() {
                   }}
                 >
                   <Text style={styles.floatingActionButtonText}>
-                    Layouts {fieldLayouts.length > 0 ? `(${fieldLayouts.length})` : ''}
+                    Layouts
                   </Text>
                   <Text style={styles.menuArrow}>{layoutsMenuOpen ? '▲' : '▼'}</Text>
                 </TouchableOpacity>
@@ -1343,6 +1597,255 @@ export default function HomeScreen() {
               {/* Save Layout Button */}
               <View style={styles.layoutSaveContainer}>
                 {!showLayoutInput ? (
+                  <View style={styles.layoutSaveColumn}>
+                    <TouchableOpacity
+                      style={[styles.floatingActionButton, styles.layoutSaveButton]}
+                      onPress={() => setShowLayoutInput(true)}
+                    >
+                      <Text style={styles.floatingActionButtonText}>Save Layout</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.floatingActionButton, styles.clearAllButtonInline, styles.layoutSaveButton]}
+                      onPress={() => {
+                        // Remove all elements from the field
+                        setPins([]);
+                        setBeams([]);
+                        // Clear all waypoints and route data
+                        setWaypoints([]);
+                        setRouteName('');
+                        setCurrentRoute(null);
+                        setIsAddingWaypoint(false);
+                        setSelectedPinId(null);
+                        setSelectedBeamId(null);
+                        setSelectedLayoutId(null);
+                      }}
+                    >
+                      <Text style={styles.floatingActionButtonText}>Clear All</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <>
+                    <TextInput
+                      style={styles.layoutNameInputInline}
+                      placeholder="Layout name..."
+                      value={layoutName}
+                      onChangeText={setLayoutName}
+                      autoFocus
+                    />
+                    <TouchableOpacity
+                      style={[styles.floatingActionButton, styles.floatingActionButtonSmall]}
+                      onPress={() => {
+                        setShowLayoutInput(false);
+                        setLayoutName('');
+                      }}
+                    >
+                      <Text style={styles.floatingActionButtonText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.floatingActionButton, styles.floatingActionButtonSmall, styles.floatingActionButtonSave]}
+                      onPress={handleSaveLayoutWithPrompt}
+                    >
+                      <Text style={styles.floatingActionButtonText}>Save</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+            </View>
+            </View>
+          </View>
+        )}
+
+        {/* Floating Controls - Action buttons at bottom in portrait */}
+        {uiVisible && isPortrait && (
+          <View style={styles.floatingControlsPortraitBottom}>
+            {waypoints.length > 0 && (
+              <View style={styles.routeInfoPortrait}>
+                <Text style={styles.routeInfoTextPortrait}>
+                  {waypoints.length} waypoints • {formatTime(calculateRouteTime(waypoints))} • {calculateRouteScore(waypoints)} pts
+                </Text>
+                <TextInput
+                  style={styles.routeNameInputPortrait}
+                  placeholder="Route name..."
+                  value={routeName}
+                  onChangeText={setRouteName}
+                />
+                <TouchableOpacity
+                  style={styles.saveButtonPortrait}
+                  onPress={saveRoute}
+                >
+                  <Text style={styles.saveButtonPortraitText}>Save</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+            <View style={styles.actionGroupPortrait}>
+              {/* Row 1: Waypoint, Save Route, Routes */}
+              <View style={styles.portraitButtonRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.floatingActionButton,
+                    isAddingWaypoint && styles.floatingActionButtonActive,
+                  ]}
+                  onPress={() => setIsAddingWaypoint(!isAddingWaypoint)}
+                >
+                  <Text style={styles.floatingActionButtonText}>
+                    {isAddingWaypoint ? '✓ Waypoint' : '+ Waypoint'}
+                  </Text>
+                </TouchableOpacity>
+                
+                {/* Save Route Button */}
+                <TouchableOpacity
+                  style={[
+                    styles.floatingActionButton,
+                    waypoints.length === 0 && styles.floatingActionButtonDisabled,
+                  ]}
+                  onPress={saveRoute}
+                  disabled={waypoints.length === 0}
+                >
+                  <Text style={styles.floatingActionButtonText}>
+                    Save Route
+                  </Text>
+                </TouchableOpacity>
+                
+                {/* Routes Collapsible Menu */}
+                <View style={styles.collapsibleMenu}>
+                  <TouchableOpacity
+                    style={[
+                      styles.floatingActionButton,
+                      routesMenuOpen && styles.floatingActionButtonMenuActive,
+                    ]}
+                    onPress={() => {
+                      setRoutesMenuOpen(!routesMenuOpen);
+                      setLayoutsMenuOpen(false);
+                    }}
+                  >
+                    <Text style={styles.floatingActionButtonText}>
+                      Routes {routes.length > 0 ? `(${routes.length})` : ''}
+                    </Text>
+                    <Text style={styles.menuArrow}>{routesMenuOpen ? '▲' : '▼'}</Text>
+                  </TouchableOpacity>
+                  {routesMenuOpen && (
+                    <View style={[
+                      styles.menuDropdown,
+                      isPortrait && styles.menuDropdownPortrait,
+                    ]}>
+                      {routes.length === 0 ? (
+                        <Text style={styles.menuEmptyText}>No routes saved</Text>
+                      ) : (
+                        <ScrollView style={styles.menuScrollView}>
+                          {routes.map((route) => (
+                            <TouchableOpacity
+                              key={route.id}
+                              style={styles.menuItem}
+                              onPress={() => {
+                                loadRoute(route);
+                                setRoutesMenuOpen(false);
+                              }}
+                            >
+                              <Text style={styles.menuItemText} numberOfLines={1}>
+                                {route.name}
+                              </Text>
+                              <Text style={styles.menuItemSubtext}>
+                                {route.waypoints.length} pts • {formatTime(route.estimatedTime)}
+                              </Text>
+                            </TouchableOpacity>
+                          ))}
+                        </ScrollView>
+                      )}
+                      {routes.length >= 2 && (
+                        <TouchableOpacity
+                          style={styles.menuActionButton}
+                          onPress={() => {
+                            setShowComparison(true);
+                            setRoutesMenuOpen(false);
+                          }}
+                        >
+                          <Text style={styles.menuActionButtonText}>Compare Routes</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  )}
+                </View>
+              </View>
+
+              {/* Row 2: Layouts, Save Layout, Clear All */}
+              <View style={styles.portraitButtonRow}>
+                {/* Layouts Collapsible Menu */}
+                <View style={styles.collapsibleMenu}>
+                  <TouchableOpacity
+                    style={[
+                      styles.floatingActionButton,
+                      layoutsMenuOpen && styles.floatingActionButtonMenuActive,
+                    ]}
+                    onPress={() => {
+                      setLayoutsMenuOpen(!layoutsMenuOpen);
+                      setRoutesMenuOpen(false);
+                    }}
+                  >
+                    <Text style={styles.floatingActionButtonText}>
+                      Layouts
+                    </Text>
+                    <Text style={styles.menuArrow}>{layoutsMenuOpen ? '▲' : '▼'}</Text>
+                  </TouchableOpacity>
+                  {layoutsMenuOpen && (
+                    <View style={[
+                      styles.menuDropdown,
+                      isPortrait && styles.menuDropdownPortrait,
+                    ]}>
+                      {fieldLayouts.length === 0 ? (
+                        <Text style={styles.menuEmptyText}>No layouts saved</Text>
+                      ) : (
+                        <ScrollView style={styles.menuScrollView}>
+                          {fieldLayouts.map((layout) => (
+                            <View key={layout.id} style={styles.menuItem}>
+                              <TouchableOpacity
+                                style={styles.menuItemContent}
+                                onPress={() => {
+                                  loadFieldLayout(layout);
+                                  setLayoutsMenuOpen(false);
+                                }}
+                              >
+                                <View style={styles.menuItemHeader}>
+                                  <Text style={styles.menuItemText} numberOfLines={1}>
+                                    {layout.name}
+                                  </Text>
+                                  {layout.isDefault && (
+                                    <View style={styles.menuBadge}>
+                                      <Text style={styles.menuBadgeText}>Default</Text>
+                                    </View>
+                                  )}
+                                </View>
+                                <Text style={styles.menuItemSubtext}>
+                                  {layout.pins.length} pins • {layout.beams.length} beams
+                                </Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                style={styles.menuItemDelete}
+                                onPress={() => {
+                                  deleteFieldLayout(layout.id);
+                                  setLayoutsMenuOpen(false);
+                                }}
+                              >
+                                <Text style={styles.menuItemDeleteText}>×</Text>
+                              </TouchableOpacity>
+                            </View>
+                          ))}
+                        </ScrollView>
+                      )}
+                      <TouchableOpacity
+                        style={styles.menuActionButton}
+                        onPress={() => {
+                          loadTeamMatchLayout();
+                          setLayoutsMenuOpen(false);
+                        }}
+                      >
+                        <Text style={styles.menuActionButtonText}>Load Default</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
+
+                {/* Save Layout Button */}
+                {!showLayoutInput ? (
                   <TouchableOpacity
                     style={styles.floatingActionButton}
                     onPress={() => setShowLayoutInput(true)}
@@ -1375,193 +1878,26 @@ export default function HomeScreen() {
                     </TouchableOpacity>
                   </>
                 )}
-              </View>
-            </View>
-          </View>
-        )}
 
-        {/* Floating Controls - Action buttons at bottom in portrait */}
-        {uiVisible && isPortrait && (
-          <View style={styles.floatingControlsPortraitBottom}>
-            {waypoints.length > 0 && (
-              <View style={styles.routeInfoPortrait}>
-                <Text style={styles.routeInfoTextPortrait}>
-                  {waypoints.length} waypoints • {formatTime(calculateRouteTime(waypoints))} • {calculateRouteScore(waypoints)} pts
-                </Text>
-                <TextInput
-                  style={styles.routeNameInputPortrait}
-                  placeholder="Route name..."
-                  value={routeName}
-                  onChangeText={setRouteName}
-                />
+                {/* Clear All Button */}
                 <TouchableOpacity
-                  style={styles.saveButtonPortrait}
-                  onPress={saveRoute}
-                >
-                  <Text style={styles.saveButtonPortraitText}>Save</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-            <View style={styles.actionGroupPortrait}>
-              <TouchableOpacity
-                style={[
-                  styles.floatingActionButton,
-                  isAddingWaypoint && styles.floatingActionButtonActive,
-                ]}
-                onPress={() => setIsAddingWaypoint(!isAddingWaypoint)}
-              >
-                <Text style={styles.floatingActionButtonText}>
-                  {isAddingWaypoint ? '✓ Waypoint' : '+ Waypoint'}
-                </Text>
-              </TouchableOpacity>
-              
-              {/* Save Route Button */}
-              <TouchableOpacity
-                style={[
-                  styles.floatingActionButton,
-                  waypoints.length === 0 && styles.floatingActionButtonDisabled,
-                ]}
-                onPress={saveRoute}
-                disabled={waypoints.length === 0}
-              >
-                <Text style={styles.floatingActionButtonText}>
-                  Save Route
-                </Text>
-              </TouchableOpacity>
-              
-              {/* Routes Collapsible Menu */}
-              <View style={styles.collapsibleMenu}>
-                <TouchableOpacity
-                  style={[
-                    styles.floatingActionButton,
-                    routesMenuOpen && styles.floatingActionButtonMenuActive,
-                  ]}
+                  style={[styles.floatingActionButton, styles.clearAllButtonInline]}
                   onPress={() => {
-                    setRoutesMenuOpen(!routesMenuOpen);
-                    setLayoutsMenuOpen(false);
+                    // Remove all elements from the field
+                    setPins([]);
+                    setBeams([]);
+                    // Clear all waypoints and route data
+                    setWaypoints([]);
+                    setRouteName('');
+                    setCurrentRoute(null);
+                    setIsAddingWaypoint(false);
+                    setSelectedPinId(null);
+                    setSelectedBeamId(null);
+                    setSelectedLayoutId(null);
                   }}
                 >
-                  <Text style={styles.floatingActionButtonText}>
-                    Routes {routes.length > 0 ? `(${routes.length})` : ''}
-                  </Text>
-                  <Text style={styles.menuArrow}>{routesMenuOpen ? '▲' : '▼'}</Text>
+                  <Text style={styles.floatingActionButtonText}>Clear All</Text>
                 </TouchableOpacity>
-                {routesMenuOpen && (
-                  <View style={[
-                    styles.menuDropdown,
-                    isPortrait && styles.menuDropdownPortrait,
-                  ]}>
-                    {routes.length === 0 ? (
-                      <Text style={styles.menuEmptyText}>No routes saved</Text>
-                    ) : (
-                      <ScrollView style={styles.menuScrollView}>
-                        {routes.map((route) => (
-                          <TouchableOpacity
-                            key={route.id}
-                            style={styles.menuItem}
-                            onPress={() => {
-                              loadRoute(route);
-                              setRoutesMenuOpen(false);
-                            }}
-                          >
-                            <Text style={styles.menuItemText} numberOfLines={1}>
-                              {route.name}
-                            </Text>
-                            <Text style={styles.menuItemSubtext}>
-                              {route.waypoints.length} pts • {formatTime(route.estimatedTime)}
-                            </Text>
-                          </TouchableOpacity>
-                        ))}
-                      </ScrollView>
-                    )}
-                    {routes.length >= 2 && (
-                      <TouchableOpacity
-                        style={styles.menuActionButton}
-                        onPress={() => {
-                          setShowComparison(true);
-                          setRoutesMenuOpen(false);
-                        }}
-                      >
-                        <Text style={styles.menuActionButtonText}>Compare Routes</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                )}
-              </View>
-
-              {/* Layouts Collapsible Menu */}
-              <View style={styles.collapsibleMenu}>
-                <TouchableOpacity
-                  style={[
-                    styles.floatingActionButton,
-                    layoutsMenuOpen && styles.floatingActionButtonMenuActive,
-                  ]}
-                  onPress={() => {
-                    setLayoutsMenuOpen(!layoutsMenuOpen);
-                    setRoutesMenuOpen(false);
-                  }}
-                >
-                  <Text style={styles.floatingActionButtonText}>
-                    Layouts {fieldLayouts.length > 0 ? `(${fieldLayouts.length})` : ''}
-                  </Text>
-                  <Text style={styles.menuArrow}>{layoutsMenuOpen ? '▲' : '▼'}</Text>
-                </TouchableOpacity>
-                {layoutsMenuOpen && (
-                  <View style={[
-                    styles.menuDropdown,
-                    isPortrait && styles.menuDropdownPortrait,
-                  ]}>
-                    {fieldLayouts.length === 0 ? (
-                      <Text style={styles.menuEmptyText}>No layouts saved</Text>
-                    ) : (
-                      <ScrollView style={styles.menuScrollView}>
-                        {fieldLayouts.map((layout) => (
-                          <View key={layout.id} style={styles.menuItem}>
-                            <TouchableOpacity
-                              style={styles.menuItemContent}
-                              onPress={() => {
-                                loadFieldLayout(layout);
-                                setLayoutsMenuOpen(false);
-                              }}
-                            >
-                              <View style={styles.menuItemHeader}>
-                                <Text style={styles.menuItemText} numberOfLines={1}>
-                                  {layout.name}
-                                </Text>
-                                {layout.isDefault && (
-                                  <View style={styles.menuBadge}>
-                                    <Text style={styles.menuBadgeText}>Default</Text>
-                                  </View>
-                                )}
-                              </View>
-                              <Text style={styles.menuItemSubtext}>
-                                {layout.pins.length} pins • {layout.beams.length} beams
-                              </Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                              style={styles.menuItemDelete}
-                              onPress={() => {
-                                deleteFieldLayout(layout.id);
-                                setLayoutsMenuOpen(false);
-                              }}
-                            >
-                              <Text style={styles.menuItemDeleteText}>×</Text>
-                            </TouchableOpacity>
-                          </View>
-                        ))}
-                      </ScrollView>
-                    )}
-                    <TouchableOpacity
-                      style={styles.menuActionButton}
-                      onPress={() => {
-                        loadTeamMatchLayout();
-                        setLayoutsMenuOpen(false);
-                      }}
-                    >
-                      <Text style={styles.menuActionButtonText}>Load Default</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
               </View>
             </View>
           </View>
@@ -1651,13 +1987,13 @@ export default function HomeScreen() {
                         <Text style={styles.sidebarItemName}>{layout.name}</Text>
                         <View style={styles.menuBadgeContainer}>
                           {layout.id === TEAM_MATCH_DEFAULT_LAYOUT_ID && (
-                            <View style={[styles.defaultBadgeSmall, { backgroundColor: '#6366f1' }]}>
-                              <Text style={styles.defaultBadgeTextSmall}>Built-in</Text>
+                            <View style={[styles.menuBadge, styles.menuBadgeBuiltIn]}>
+                              <Text style={styles.menuBadgeText}>Built-in</Text>
                             </View>
                           )}
                           {layout.isDefault && layout.id !== TEAM_MATCH_DEFAULT_LAYOUT_ID && (
-                            <View style={styles.defaultBadgeSmall}>
-                              <Text style={styles.defaultBadgeTextSmall}>Default</Text>
+                            <View style={styles.menuBadge}>
+                              <Text style={styles.menuBadgeText}>Default</Text>
                             </View>
                           )}
                         </View>
@@ -1778,22 +2114,6 @@ export default function HomeScreen() {
                 </ScrollView>
               )}
             </View>
-
-            {/* Clear All Button */}
-            <TouchableOpacity
-              style={styles.clearAllButton}
-              onPress={() => {
-                setWaypoints([]);
-                setPins([]);
-                setBeams([]);
-                setSelectedPinId(null);
-                setRouteName('');
-                setCurrentRoute(null);
-                setIsAddingWaypoint(false);
-              }}
-            >
-              <Text style={styles.clearAllButtonText}>Clear All</Text>
-            </TouchableOpacity>
           </ScrollView>
         </View>
       )}
@@ -1872,7 +2192,7 @@ export default function HomeScreen() {
       )}
 
       {/* Debug Messages Overlay - Bottom Left */}
-      {false && Platform.OS === 'web' && debugMessages.length > 0 && (
+      {isDebugBuild && debugMessages.length > 0 && (
         <View style={styles.debugOverlay}>
           {debugMessages.map((msg, index) => (
             <Text key={index} style={styles.debugText} numberOfLines={1}>
@@ -1881,6 +2201,129 @@ export default function HomeScreen() {
           ))}
         </View>
       )}
+
+      {/* Properties Panel - Right Side */}
+      {(selectedPinId || selectedBeamId) && (
+        <View 
+          ref={propertiesPanelRef}
+          style={[
+            styles.propertiesPanel,
+            propertiesPanelPosition && {
+              right: undefined,
+              top: undefined,
+              left: propertiesPanelPosition.x,
+              top: propertiesPanelPosition.y,
+            }
+          ]}
+        >
+          <View 
+            style={styles.propertiesPanelHeader}
+            {...propertiesPanelPanResponder.panHandlers}
+          >
+            <Text style={styles.propertiesPanelTitle}>
+              {selectedPinId ? 'Pin Properties' : 'Beam Properties'}
+            </Text>
+            <TouchableOpacity
+              style={styles.closeButton}
+              onPress={handleClearSelection}
+            >
+              <Text style={styles.closeButtonText}>×</Text>
+            </TouchableOpacity>
+          </View>
+          
+          {selectedPinId && (() => {
+            const selectedPin = pins.find(p => p.id === selectedPinId);
+            if (!selectedPin) return null;
+            
+            return (
+              <>
+                <View style={styles.propertyRow}>
+                  <Text style={styles.propertyLabel}>Snappable</Text>
+                  <Switch
+                    value={selectedPin.snappable !== false}
+                    onValueChange={() => togglePinSnappable(selectedPinId)}
+                    trackColor={{ false: '#767577', true: '#3b82f6' }}
+                    thumbColor={selectedPin.snappable !== false ? '#fff' : '#f4f3f4'}
+                  />
+                </View>
+                
+                <View style={styles.propertyRow}>
+                  <Text style={styles.propertyLabel}>Visible</Text>
+                  <Switch
+                    value={selectedPin.visible !== false}
+                    onValueChange={() => togglePinVisibility(selectedPinId)}
+                    trackColor={{ false: '#767577', true: '#3b82f6' }}
+                    thumbColor={selectedPin.visible !== false ? '#fff' : '#f4f3f4'}
+                  />
+                </View>
+                
+                <TouchableOpacity
+                  style={styles.removeButton}
+                  onPress={() => {
+                    removePin(selectedPinId);
+                    setSelectedPinId(null);
+                  }}
+                >
+                  <Text style={styles.removeButtonText}>Remove Pin</Text>
+                </TouchableOpacity>
+              </>
+            );
+          })()}
+          
+          {selectedBeamId && (() => {
+            const selectedBeam = beams.find(b => b.id === selectedBeamId);
+            if (!selectedBeam) return null;
+            
+            return (
+              <>
+                <View style={styles.propertyRow}>
+                  <Text style={styles.propertyLabel}>Snappable</Text>
+                  <Switch
+                    value={selectedBeam.snappable !== false}
+                    onValueChange={() => toggleBeamSnappable(selectedBeamId)}
+                    trackColor={{ false: '#767577', true: '#3b82f6' }}
+                    thumbColor={selectedBeam.snappable !== false ? '#fff' : '#f4f3f4'}
+                  />
+                </View>
+                
+                <View style={styles.propertyRow}>
+                  <Text style={styles.propertyLabel}>Visible</Text>
+                  <Switch
+                    value={selectedBeam.visible !== false}
+                    onValueChange={() => toggleBeamVisibility(selectedBeamId)}
+                    trackColor={{ false: '#767577', true: '#3b82f6' }}
+                    thumbColor={selectedBeam.visible !== false ? '#fff' : '#f4f3f4'}
+                  />
+                </View>
+                
+                <TouchableOpacity
+                  style={styles.removeButton}
+                  onPress={() => {
+                    removeBeam(selectedBeamId);
+                    setSelectedBeamId(null);
+                  }}
+                >
+                  <Text style={styles.removeButtonText}>Remove Beam</Text>
+                </TouchableOpacity>
+              </>
+            );
+          })()}
+        </View>
+      )}
+
+      {/* Snap Toggle - Right side, centered vertically */}
+      {uiVisible && (
+        <View style={styles.snapToggleContainer}>
+          <Text style={styles.snapToggleLabel}>Snap</Text>
+          <Switch
+            value={pinSnapEnabled}
+            onValueChange={setPinSnapEnabled}
+            trackColor={{ false: '#767577', true: '#2563eb' }}
+            thumbColor={pinSnapEnabled ? '#fff' : '#f4f3f4'}
+          />
+        </View>
+      )}
+
     </SafeAreaView>
   );
 }
@@ -1903,7 +2346,7 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
     alignItems: 'center',
     paddingHorizontal: 12,
-    paddingVertical: 4,
+    paddingVertical: 8,
     backgroundColor: 'rgba(37, 99, 235, 0.85)',
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255, 255, 255, 0.2)',
@@ -1921,14 +2364,46 @@ const styles = StyleSheet.create({
     }),
   } as any,
   compactHeaderPortrait: {
-    paddingVertical: 8,
+    paddingVertical: 16,
   },
   compactTitle: {
-    fontSize: 16,
+    fontSize: 20,
     fontWeight: 'bold',
     color: '#fff',
     flex: 1,
     textAlign: 'center',
+  },
+  layoutNameBar: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(37, 99, 235, 0.6)',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    zIndex: 10,
+  },
+  layoutNameText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#fff',
+    textAlign: 'center',
+  },
+  layoutNameLandscape: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(37, 99, 235, 0.7)',
+    borderRadius: 8,
+    minWidth: 140,
+  },
+  landscapeButtonsRow: {
+    flexDirection: 'row',
+    gap: 20,
+    alignItems: 'flex-start',
+  },
+  layoutNameTextLandscape: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#fff',
+    textAlign: 'left',
   },
   headerMenuButton: {
     width: 36,
@@ -1973,11 +2448,16 @@ const styles = StyleSheet.create({
       elevation: 10,
     }),
   } as any,
-  floatingHamburger: {
+  hamburgerAndLayoutRow: {
     position: 'absolute',
-    top: 30,
-    left: 8,
+    top: 60,
+    left: 58,
     zIndex: 1000,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  floatingHamburger: {
     backgroundColor: 'rgba(37, 99, 235, 0.85)',
     width: 40,
     height: 40,
@@ -2015,6 +2495,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     overflow: 'hidden',
+    marginTop: -50,
   },
   fieldContainerInner: {
     width: '100%',
@@ -2023,34 +2504,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   fieldContainerInnerPortrait: {
-    transform: [
-      { rotate: '90deg' },
-      { scale: 1.5 },
-      { translateX: 10 },
-      { translateY: 10 },
-    ],
     alignSelf: 'center',
     justifyContent: 'center',
     alignItems: 'center',
   },
   fieldContainerInnerLandscape: {
-    transform: [{ translateX: 70 }, { translateY: 15 }],
+    transform: [{ translateX: 120 }, { translateY: 15 }],
   },
   fieldContainerInnerLandscapeHidden: {
-    transform: [{ translateX: 15 }, { translateY: 20 }, { scale: 1.14 }],
+    transform: [{ translateX: 65 }, { translateY: 20 }, { scale: 1.14 }],
   },
   fieldContainerInnerPortraitHidden: {
-    transform: [
-      { rotate: '90deg' },
-      { translateX: 15 },
-      { translateY: 20 },
-      { scale: 1.14 },
-    ],
+    transform: [{ translateX: 65 }, { translateY: 20 }, { scale: 1.14 }],
   },
   floatingControls: {
     position: 'absolute',
-    top: 85,
-    left: 8,
+    top: 140,
+    left: 58,
     zIndex: 200,
     flexDirection: 'row',
     gap: 20,
@@ -2058,7 +2528,7 @@ const styles = StyleSheet.create({
   },
   floatingControlsPortraitTop: {
     position: 'absolute',
-    top: 55,
+    top: 100,
     left: 0,
     right: 0,
     flexDirection: 'row',
@@ -2084,7 +2554,7 @@ const styles = StyleSheet.create({
   } as any,
   floatingHamburgerPortraitLeft: {
     position: 'absolute',
-    top: 60,
+    top: 105,
     left: 4,
     backgroundColor: 'rgba(37, 99, 235, 0.85)',
     width: 40,
@@ -2108,14 +2578,14 @@ const styles = StyleSheet.create({
   } as any,
   pinColorGroupPortraitCentered: {
     flexDirection: 'row',
-    gap: 6,
+    gap: 10,
     alignItems: 'center',
     flexWrap: 'wrap',
     justifyContent: 'center',
   },
   floatingControlsPortraitBottom: {
     position: 'absolute',
-    bottom: -5,
+    bottom: 15,
     left: 0,
     right: 0,
     flexDirection: 'column',
@@ -2177,6 +2647,94 @@ const styles = StyleSheet.create({
     flexDirection: 'column',
     gap: 10,
     alignItems: 'flex-start',
+    marginTop: -10,
+  },
+  propertiesPanel: {
+    position: 'absolute',
+    right: 12,
+    top: '50%',
+    marginTop: -50,
+    width: 140,
+    padding: 8,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderWidth: 1,
+    borderColor: 'rgba(37, 99, 235, 0.3)',
+    zIndex: 200,
+    ...(Platform.OS === 'web' ? {
+      backdropFilter: 'blur(10px)',
+      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+    } : {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.1,
+      shadowRadius: 8,
+      elevation: 5,
+    }),
+  },
+  propertiesPanelHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  propertiesPanelTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1f2937',
+    flex: 1,
+  },
+  closeButton: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  closeButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#ef4444',
+    lineHeight: 16,
+  },
+  propertyRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  propertyLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  removeButton: {
+    marginTop: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 5,
+    backgroundColor: '#ef4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  removeButtonText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  snapToggleContainer: {
+    position: 'absolute',
+    right: 12,
+    bottom: 20,
+    alignItems: 'center',
+    gap: 8,
+    zIndex: 200,
+  },
+  snapToggleLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1f2937',
   },
   pinColorGroupPortrait: {
     flexDirection: 'row',
@@ -2266,13 +2824,21 @@ const styles = StyleSheet.create({
     flexDirection: 'column',
     gap: 10,
     alignItems: 'flex-start',
+    marginTop: -10,
   },
   actionGroupPortrait: {
+    flexDirection: 'column',
+    gap: 6,
+    alignItems: 'center',
+    width: '100%',
+  },
+  portraitButtonRow: {
     flexDirection: 'row',
     gap: 6,
     alignItems: 'center',
-    flexWrap: 'wrap',
     justifyContent: 'center',
+    width: '100%',
+    flexWrap: 'wrap',
   },
   floatingActionButton: {
     paddingHorizontal: 10,
@@ -2331,6 +2897,14 @@ const styles = StyleSheet.create({
     gap: 6,
     alignItems: 'center',
   },
+  layoutSaveColumn: {
+    flexDirection: 'column',
+    gap: 6,
+    alignItems: 'flex-start',
+  },
+  layoutSaveButton: {
+    // Same size as other action buttons (Routes, Layouts, Waypoint)
+  },
   layoutNameInputInline: {
     backgroundColor: 'rgba(255, 255, 255, 0.9)',
     borderRadius: 6,
@@ -2350,9 +2924,9 @@ const styles = StyleSheet.create({
     marginTop: 4,
     backgroundColor: '#fff',
     borderRadius: 6,
-    minWidth: 180,
-    maxWidth: 220,
-    maxHeight: 250,
+    minWidth: 90,
+    maxWidth: 110,
+    maxHeight: 125,
     ...(Platform.OS === 'web' ? {
       boxShadow: '0 4px 8px rgba(0, 0, 0, 0.2)',
     } : {
@@ -2370,10 +2944,10 @@ const styles = StyleSheet.create({
     // Portrait mode uses same styling as landscape
   },
   menuScrollView: {
-    maxHeight: 180,
+    maxHeight: 90,
   },
   menuItem: {
-    padding: 12,
+    padding: 6,
     borderBottomWidth: 1,
     borderBottomColor: '#f3f4f6',
     flexDirection: 'row',
@@ -2384,19 +2958,19 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   menuItemDelete: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
     backgroundColor: '#ef4444',
     justifyContent: 'center',
     alignItems: 'center',
-    marginLeft: 8,
+    marginLeft: 4,
   },
   menuItemDeleteText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 9,
     fontWeight: 'bold',
-    lineHeight: 18,
+    lineHeight: 9,
   },
   menuItemHeader: {
     flexDirection: 'row',
@@ -2405,25 +2979,25 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   menuItemText: {
-    fontSize: 13,
+    fontSize: 10,
     fontWeight: '600',
     color: '#1f2937',
     flex: 1,
   },
   menuItemSubtext: {
-    fontSize: 11,
+    fontSize: 8,
     color: '#6b7280',
   },
   menuBadge: {
     backgroundColor: '#10b981',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    marginLeft: 8,
+    paddingHorizontal: 3,
+    paddingVertical: 1,
+    borderRadius: 2,
+    marginLeft: 4,
   },
   menuBadgeContainer: {
     flexDirection: 'row',
-    gap: 4,
+    gap: 2,
     alignItems: 'center',
   },
   menuBadgeBuiltIn: {
@@ -2431,15 +3005,15 @@ const styles = StyleSheet.create({
   },
   menuBadgeText: {
     color: '#fff',
-    fontSize: 9,
+    fontSize: 7,
     fontWeight: '600',
   },
   menuEmptyText: {
-    fontSize: 12,
+    fontSize: 9,
     color: '#9ca3af',
     fontStyle: 'italic',
     textAlign: 'center',
-    padding: 16,
+    padding: 8,
   },
   menuActionButton: {
     padding: 10,
@@ -2647,6 +3221,19 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
   },
+  clearAllButtonInline: {
+    backgroundColor: 'rgba(239, 68, 68, 0.85)',
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    ...(Platform.OS === 'web' ? {
+      boxShadow: '0 4px 12px rgba(239, 68, 68, 0.3)',
+    } : {
+      shadowColor: '#ef4444',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.4,
+      shadowRadius: 8,
+      elevation: 10,
+    }),
+  } as any,
   clearAllButton: {
     backgroundColor: '#ef4444',
     padding: 12,
@@ -2798,4 +3385,27 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.3)',
     zIndex: 99,
   },
+  debugButtonRow: {
+    position: 'absolute',
+    bottom: 16,
+    right: 16,
+    zIndex: 300,
+  },
+  debugButton: {
+    backgroundColor: 'rgba(37, 99, 235, 0.85)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    ...(Platform.OS === 'web'
+      ? { backdropFilter: 'blur(6px)' }
+      : {}),
+  } as any,
+  debugButtonText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
 });
+

@@ -22,7 +22,8 @@
     "plugins": [
       "expo-router",
       "expo-asset",
-      "./plugins/withKotlinVersion.js"
+      "./plugins/withKotlinVersion.js",
+      "expo-font"
     ],
     "scheme": "mixmatch",
     "extra": {

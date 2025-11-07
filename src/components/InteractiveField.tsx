@@ -32,11 +32,15 @@ interface InteractiveFieldProps {
   onPinMove?: (id: string, position: FieldPosition) => void;
   onPinRemove?: (id: string) => void;
   onPinClick?: (id: string, pin: Pin) => void;
+  onPinLongPress?: (id: string, pin: Pin) => void;
   onPinToggleHighlight?: (id: string) => void;
+  pinSnapEnabled?: boolean;
   onBeamAdd?: (position?: FieldPosition) => void;
   onBeamMove?: (id: string, position: FieldPosition) => void;
   onBeamRemove?: (id: string) => void;
+  onBeamClick?: (id: string, beam: Beam) => void;
   onBeamToggleHighlight?: (id: string) => void;
+  onClearSelection?: () => void;
   fieldWidth?: number;
   fieldHeight?: number;
   containerStyle?: object;
@@ -316,75 +320,92 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
   onPinMove,
   onPinRemove,
   onPinClick,
+  onPinLongPress,
   onPinToggleHighlight: _onPinToggleHighlight,
+  pinSnapEnabled = true,
   onBeamAdd: _onBeamAdd,
   onBeamMove,
   onBeamRemove,
+  onBeamClick,
   onBeamToggleHighlight: _onBeamToggleHighlight,
+  onClearSelection,
   fieldWidth = 48,
   fieldHeight = 48,
   containerStyle,
 }) => {
-  const [dragStart, setDragStart] = useState<{ x: number; y: number; id: string; type: 'pin' | 'waypoint' | 'beam' } | null>(null);
+  const [dragStart, setDragStart] = useState<{ x: number; y: number; id: string; type: 'pin' | 'waypoint' | 'beam'; originalX?: number; originalY?: number } | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number; id: string; type: 'pin' | 'waypoint' | 'beam'; originalX?: number; originalY?: number } | null>(null);
   const [dimensions, setDimensions] = useState(Dimensions.get('window'));
   const [debugInfo, setDebugInfo] = useState<string>('');
   const [dragState, setDragState] = useState<{ x: number; y: number; type: string } | null>(null);
   const [tapStart, setTapStart] = useState<{ x: number; y: number; id: string; type: 'pin' | 'waypoint' | 'beam' } | null>(null);
-  const [longPressTimer, setLongPressTimer] = useState<NodeJS.Timeout | null>(null);
-  const [lastClickTime, setLastClickTime] = useState<{ time: number; id: string | null }>({ time: 0, id: null });
+  const [containerMetrics, setContainerMetrics] = useState<{ width: number; height: number; pageX: number; pageY: number } | null>(null);
   const containerRef = useRef<View>(null);
+  const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const longPressFiredRef = useRef<boolean>(false);
+  
+  // Keep ref in sync with state
+  useEffect(() => {
+    dragStartRef.current = dragStart;
+  }, [dragStart]);
 
-  // Group pins into stacks only if they're at the exact same position (after being dragged together)
-  // Also considers beam holes as part of stacks
+  // Group pins into stacks if they share the same position
   const groupPinsIntoStacks = useCallback((): Map<string, Pin[]> => {
     const stacks = new Map<string, Pin[]>();
     const processed = new Set<string>();
-    
-    // Only stack pins that are at the exact same position (within a very small tolerance)
-    const POSITION_TOLERANCE = 0.1; // Very small tolerance for "exact same" position
-    
+    const POSITION_TOLERANCE = 0.1;
+
     for (const pin of pins) {
       if (processed.has(pin.id)) continue;
-      
-      // Find all pins at the exact same position
+
       const stack: Pin[] = [pin];
       processed.add(pin.id);
-      
+
       for (const otherPin of pins) {
         if (processed.has(otherPin.id)) continue;
-        
         const dx = Math.abs(pin.position.x - otherPin.position.x);
         const dy = Math.abs(pin.position.y - otherPin.position.y);
-        
-        // Only stack if positions are exactly the same (within tolerance)
         if (dx < POSITION_TOLERANCE && dy < POSITION_TOLERANCE) {
           stack.push(otherPin);
           processed.add(otherPin.id);
         }
       }
-      
-      // Only create a stack if there are multiple pins at the same position
+
       if (stack.length > 1) {
         stacks.set(stack[0].id, stack);
       }
     }
-    
+
     return stacks;
   }, [pins]);
+
+  const handleContainerLayout = useCallback(() => {
+    if (!containerRef.current) {
+      return;
+    }
+    if (Platform.OS !== 'web' && typeof (containerRef.current as any).measure === 'function') {
+      (containerRef.current as any).measure((x: number, y: number, width: number, height: number, pageX: number, pageY: number) => {
+        setContainerMetrics({ width, height, pageX, pageY });
+      });
+    } else if (Platform.OS === 'web') {
+      const node = containerRef.current as any;
+      if (node && node.getBoundingClientRect) {
+        const rect = node.getBoundingClientRect();
+        setContainerMetrics({ width: rect.width, height: rect.height, pageX: rect.left, pageY: rect.top });
+      }
+    }
+  }, []);
 
   useEffect(() => {
     const subscription = Dimensions.addEventListener('change', ({ window }) => {
       setDimensions(window);
+      handleContainerLayout();
     });
 
     return () => {
       subscription?.remove();
-      // Clean up long press timer on unmount
-      if (longPressTimer) {
-        clearTimeout(longPressTimer);
-      }
     };
-  }, [longPressTimer]);
+  }, [handleContainerLayout]);
 
   // Check if device is in landscape mode
   const isLandscape = dimensions.width > dimensions.height;
@@ -472,41 +493,54 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
   }, [fieldToSvg, fieldWidth, fieldHeight]);
 
   // Find nearby pins or beam holes for snapping
-  const findNearbyTarget = useCallback((position: FieldPosition, excludeId?: string): { pin?: Pin; hole?: { beam: Beam; index: number; position: FieldPosition } } | null => {
+  const findNearbyTarget = useCallback((position: FieldPosition, excludeId?: string, draggingPin?: Pin): { pin?: Pin; hole?: { beam: Beam; index: number; position: FieldPosition } } | null => {
     const POSITION_TOLERANCE = 0.1;
     const HOLE_SNAP_DISTANCE = 2.5; // Field units for snapping to beam holes
     
-    // First check for nearby pins
-    for (const pin of pins) {
-      if (pin.id === excludeId) continue;
-      
-      const dx = Math.abs(pin.position.x - position.x);
-      const dy = Math.abs(pin.position.y - position.y);
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      
-      if (distance < PIN_SNAP_DISTANCE) {
-        // Check if this pin is already in a full stack (3 pins)
-        let stackCount = 0;
+    // Check if the dragging pin is snappable (defaults to true)
+    const isDraggingPinSnappable = draggingPin?.snappable !== false;
+    
+    // First check for nearby pins (only if snap is enabled globally AND dragging pin is snappable)
+    if (pinSnapEnabled && isDraggingPinSnappable) {
+      for (const pin of pins) {
+        if (pin.id === excludeId) continue;
         
-        for (const p of pins) {
-          const stackDx = Math.abs(p.position.x - pin.position.x);
-          const stackDy = Math.abs(p.position.y - pin.position.y);
+        // Check if target pin is also snappable (defaults to true)
+        const isTargetPinSnappable = pin.snappable !== false;
+        if (!isTargetPinSnappable) continue;
+        
+        const dx = Math.abs(pin.position.x - position.x);
+        const dy = Math.abs(pin.position.y - position.y);
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance < PIN_SNAP_DISTANCE) {
+          // Check if this pin is already in a full stack (3 pins)
+          let stackCount = 0;
           
-          if (stackDx < POSITION_TOLERANCE && stackDy < POSITION_TOLERANCE) {
-            stackCount++;
+          for (const p of pins) {
+            const stackDx = Math.abs(p.position.x - pin.position.x);
+            const stackDy = Math.abs(p.position.y - pin.position.y);
+            
+            if (stackDx < POSITION_TOLERANCE && stackDy < POSITION_TOLERANCE) {
+              stackCount++;
+            }
           }
-        }
-        
-        // Only allow snapping if stack has less than 3 pins
-        if (stackCount < 3) {
-          return { pin };
+          
+          // Only allow snapping if stack has less than 3 pins
+          if (stackCount < 3) {
+            return { pin };
+          }
         }
       }
     }
     
-    // Then check for nearby beam holes
-    if (beams) {
+    // Then check for nearby beam holes (only if dragging pin is snappable)
+    if (beams && isDraggingPinSnappable) {
       for (const beam of beams) {
+        // Check if beam allows snapping (defaults to true)
+        const isBeamSnappable = beam.snappable !== false;
+        if (!isBeamSnappable) continue;
+        
         const holePositions = getBeamHolePositions(beam);
         
         for (let i = 0; i < holePositions.length; i++) {
@@ -537,28 +571,38 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
     }
     
     return null;
-  }, [pins, beams, getBeamHolePositions]);
+  }, [pins, beams, pinSnapEnabled, getBeamHolePositions]);
 
   // Convert screen coordinates to SVG coordinates
   const screenToSvg = useCallback((screenX: number, screenY: number) => {
-    // Scale screen coordinates to SVG viewBox
-    const svgX = (screenX / svgDisplayWidth) * SVG_VIEWBOX_WIDTH;
-    const svgY = (screenY / svgDisplayHeight) * SVG_VIEWBOX_HEIGHT;
+    // Use containerMetrics if available (more accurate), otherwise fall back to display dimensions
+    const width = containerMetrics?.width ?? svgDisplayWidth;
+    const height = containerMetrics?.height ?? svgDisplayHeight;
+    
+    // Ensure we have valid dimensions
+    if (!width || !height || width <= 0 || height <= 0) {
+      console.warn('⚠️ Invalid container dimensions:', { width, height, containerMetrics });
+      return { x: 0, y: 0 };
+    }
+    
+    // Normalize coordinates to 0-1 range, then scale to SVG viewbox
+    const normalizedX = Math.max(0, Math.min(1, screenX / width));
+    const normalizedY = Math.max(0, Math.min(1, screenY / height));
+    const svgX = normalizedX * SVG_VIEWBOX_WIDTH;
+    const svgY = normalizedY * SVG_VIEWBOX_HEIGHT;
+    
     return { x: svgX, y: svgY };
-  }, [svgDisplayWidth, svgDisplayHeight]);
+  }, [containerMetrics, svgDisplayWidth, svgDisplayHeight]);
 
   // Helper function to extract coordinates from events (works on web and native)
   const getCoordinatesFromEvent = useCallback((evt: any): { x: number; y: number } | null => {
     if (Platform.OS === 'web') {
-      // For web, find the SVG element or its container
       try {
         const target = evt.nativeEvent.target as HTMLElement;
         const svgElement = target?.closest('svg');
         if (!svgElement) return null;
-        
         const rect = svgElement.getBoundingClientRect();
         if (!rect) return null;
-        
         return {
           x: evt.nativeEvent.pageX - rect.left,
           y: evt.nativeEvent.pageY - rect.top,
@@ -568,20 +612,48 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
         return null;
       }
     } else {
-      // Native: use locationX and locationY relative to the view
+      // For native platforms, use pageX/pageY with containerMetrics for accurate coordinates
+      // This accounts for any transforms or offsets of the container
+      const pageX = evt.nativeEvent.pageX;
+      const pageY = evt.nativeEvent.pageY;
+      
+      if (pageX === undefined || pageY === undefined) {
+        // Fallback to locationX/locationY if pageX/pageY not available
+        const locationX = evt.nativeEvent.locationX;
+        const locationY = evt.nativeEvent.locationY;
+        if (locationX !== undefined && locationY !== undefined) {
+          return { x: locationX, y: locationY };
+        }
+        return null;
+      }
+      
+      if (containerMetrics && containerMetrics.pageX !== undefined && containerMetrics.pageY !== undefined) {
+        // Calculate relative to container position
+        return {
+          x: pageX - containerMetrics.pageX,
+          y: pageY - containerMetrics.pageY,
+        };
+      }
+      
+      // If containerMetrics not available, try locationX/locationY as fallback
       const locationX = evt.nativeEvent.locationX;
       const locationY = evt.nativeEvent.locationY;
-      if (locationX === undefined || locationY === undefined) return null;
-      return { x: locationX, y: locationY };
+      if (locationX !== undefined && locationY !== undefined) {
+        return { x: locationX, y: locationY };
+      }
+      
+      return null;
     }
-  }, []);
+  }, [containerMetrics]);
 
   // Detect element at position
   const detectElementAtPosition = useCallback((x: number, y: number) => {
     const svgCoords = screenToSvg(x, y);
     
-    // Check beams first (larger)
+    // Check beams first (larger) - only visible beams
     for (const beam of beams) {
+      if (beam.visible === false) continue;
+      
       const beamSvg = fieldToSvg(beam.position.x, beam.position.y);
       const beamHalfWidth = 93.75 / 2 + 5;
       const beamHalfHeight = 37.5 / 2 + 5;
@@ -593,8 +665,10 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
       }
     }
     
-    // Check pins
+    // Check pins - only visible pins
     for (const pin of pins) {
+      if (pin.visible === false) continue;
+      
       const pinSvg = fieldToSvg(pin.position.x, pin.position.y);
       const dx = Math.abs(svgCoords.x - pinSvg.x);
       const dy = Math.abs(svgCoords.y - pinSvg.y);
@@ -628,18 +702,14 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
         
         const detected = detectElementAtPosition(coords.x, coords.y);
         if (detected) {
-          const debugMsg = `Detected ${detected.type} ${detected.id} at (${coords.x.toFixed(1)}, ${coords.y.toFixed(1)})`;
-          setDebugInfo(debugMsg);
-          console.log('🔍 [DEBUG]', debugMsg);
           return true;
         }
         // Also respond to empty space clicks to add waypoints
         return true;
       },
-      onMoveShouldSetPanResponder: () => {
-        // Only respond to moves if we're already dragging
-        return !!dragStart;
-      },
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
       onPanResponderGrant: (evt) => {
         const coords = getCoordinatesFromEvent(evt);
         if (!coords) return;
@@ -647,62 +717,93 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
         const detected = detectElementAtPosition(coords.x, coords.y);
         if (detected) {
           // Store tap start for click detection
+          const dragStartValue = { x: coords.x, y: coords.y, id: detected.id, type: detected.type };
           setTapStart({ x: coords.x, y: coords.y, id: detected.id, type: detected.type });
-          setDragStart({ x: coords.x, y: coords.y, id: detected.id, type: detected.type });
+          setDragStart(dragStartValue);
+          dragStartRef.current = dragStartValue; // Update ref immediately
+          
+          // Store original position for tap detection
           const pos = detected.element.position;
+          dragStartRef.current.originalX = pos.x;
+          dragStartRef.current.originalY = pos.y;
+          
           setDragState({ x: pos.x, y: pos.y, type: detected.type });
           const debugMsg = `Touching ${detected.type} ${detected.id} at screen (${coords.x.toFixed(1)}, ${coords.y.toFixed(1)})`;
           setDebugInfo(debugMsg);
-          console.log('👆 [DEBUG]', debugMsg);
           
-          // Set up long press timer for pins (native only)
-          if (detected.type === 'pin' && onPinRemove && Platform.OS !== 'web') {
-            const timer = setTimeout(() => {
-              console.log('🗑️ Long-press delete pin:', detected.id);
-              onPinRemove(detected.id);
-              setDebugInfo(`Deleted pin ${detected.id}`);
-              setLongPressTimer(null);
-            }, 500); // 500ms long press
-            setLongPressTimer(timer);
-          } else if (detected.type === 'beam' && onBeamRemove && Platform.OS !== 'web') {
-            const timer = setTimeout(() => {
-              console.log('🗑️ Long-press delete beam:', detected.id);
-              onBeamRemove(detected.id);
-              setDebugInfo(`Deleted beam ${detected.id}`);
-              setLongPressTimer(null);
-            }, 500); // 500ms long press
-            setLongPressTimer(timer);
+          // Immediately select pin/beam when touched (for both tap and drag)
+          if (detected.type === 'pin' && onPinClick) {
+            const pin = detected.element as Pin;
+            console.log('👆 Pin touched - selecting:', detected.id);
+            onPinClick(detected.id, pin);
+          } else if (detected.type === 'beam' && onBeamClick) {
+            const beam = detected.element as Beam;
+            console.log('👆 Beam touched - selecting:', detected.id);
+            onBeamClick(detected.id, beam);
+          }
+          
+          // Start long-press timer for pins
+          if (detected.type === 'pin' && onPinLongPress) {
+            const pin = detected.element as Pin;
+            longPressFiredRef.current = false; // Reset flag
+            longPressTimerRef.current = setTimeout(() => {
+              longPressFiredRef.current = true; // Mark as fired
+              console.log('🔘 Long-press detected on pin:', detected.id);
+              onPinLongPress(detected.id, pin);
+              setDebugInfo(`Long-pressed pin ${detected.id}`);
+              longPressTimerRef.current = null; // Clear timer ref after firing
+            }, 500); // 500ms long-press duration
           }
         } else {
           // Empty space - prepare for potential waypoint addition
+          const dragStartValue = { x: coords.x, y: coords.y, id: '', type: 'waypoint' as const };
           setTapStart({ x: coords.x, y: coords.y, id: '', type: 'waypoint' });
-          setDragStart({ x: coords.x, y: coords.y, id: '', type: 'waypoint' });
+          setDragStart(dragStartValue);
+          dragStartRef.current = dragStartValue; // Update ref immediately
           const svgCoords = screenToSvg(coords.x, coords.y);
           const fieldPos = svgToField(svgCoords.x, svgCoords.y);
           setDragState({ x: fieldPos.x, y: fieldPos.y, type: 'waypoint' });
         }
       },
       onPanResponderMove: (evt, gestureState) => {
-        if (!dragStart) return;
+        const currentDragStart = dragStartRef.current;
+        if (!currentDragStart) {
+          return;
+        }
         
-        // If moved more than 5 pixels, treat as drag and cancel long press
-        if (Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5) {
-          setTapStart(null); // Clear tap start if dragging
-          if (longPressTimer) {
-            clearTimeout(longPressTimer);
-            setLongPressTimer(null);
+        // Don't clear tapStart here - we'll check movement in onPanResponderRelease
+        // Only cancel long-press timer if dragging significantly (increased threshold for mobile)
+        if (Math.abs(gestureState.dx) > 15 || Math.abs(gestureState.dy) > 15) {
+          // Cancel long-press timer if dragging significantly
+          if (longPressTimerRef.current) {
+            clearTimeout(longPressTimerRef.current);
+            longPressTimerRef.current = null;
+            console.log('🚫 Long-press cancelled due to movement');
           }
         }
         
+        // Only update position if there's significant movement (to prevent tap from moving element)
+        const dx = Math.abs(gestureState.dx || 0);
+        const dy = Math.abs(gestureState.dy || 0);
+        const hasSignificantMovement = dx > 5 || dy > 5;
+        
+        if (!hasSignificantMovement) {
+          // Don't update position for very small movements (likely a tap)
+          return;
+        }
+        
         const coords = getCoordinatesFromEvent(evt);
-        if (!coords) return;
+        if (!coords) {
+          return;
+        }
         
         const svgCoords = screenToSvg(coords.x, coords.y);
         let fieldPos = svgToField(svgCoords.x, svgCoords.y);
         
         // Snap pin to nearby pin or beam hole if close enough and stack not full
-        if (dragStart.type === 'pin') {
-          const nearbyTarget = findNearbyTarget(fieldPos, dragStart.id);
+        if (currentDragStart.type === 'pin') {
+          const draggingPin = pins.find(p => p.id === currentDragStart.id);
+          const nearbyTarget = findNearbyTarget(fieldPos, currentDragStart.id, draggingPin);
           if (nearbyTarget) {
             if (nearbyTarget.pin) {
               // Snap to the nearby pin's position
@@ -716,72 +817,152 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
           }
         }
         
-        setDragState({ x: fieldPos.x, y: fieldPos.y, type: dragStart.type });
-        const dragMsg = `${dragStart.type} ${dragStart.id}: screen(${coords.x.toFixed(1)}, ${coords.y.toFixed(1)}) -> field(${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`;
+        setDragState({ x: fieldPos.x, y: fieldPos.y, type: currentDragStart.type });
+        const dragMsg = `${currentDragStart.type} ${currentDragStart.id}: screen(${coords.x.toFixed(1)}, ${coords.y.toFixed(1)}) -> field(${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`;
         setDebugInfo(dragMsg);
-        if (dragStart.type === 'beam') {
-          console.log('🔧 [DEBUG] Beam drag:', dragMsg);
-        }
         
-        if (dragStart.type === 'pin' && onPinMove) {
-          onPinMove(dragStart.id, fieldPos);
-        } else if (dragStart.type === 'waypoint') {
-          onWaypointMove(dragStart.id, fieldPos);
-        } else if (dragStart.type === 'beam' && onBeamMove) {
-          onBeamMove(dragStart.id, fieldPos);
+        if (currentDragStart.type === 'pin' && onPinMove) {
+          console.log('📌 Pin moved:', currentDragStart.id, `to (${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`);
+          onPinMove(currentDragStart.id, fieldPos);
+        } else if (currentDragStart.type === 'waypoint') {
+          onWaypointMove(currentDragStart.id, fieldPos);
+        } else if (currentDragStart.type === 'beam' && onBeamMove) {
+          console.log('🔧 Beam moved:', currentDragStart.id, `to (${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`);
+          onBeamMove(currentDragStart.id, fieldPos);
         }
       },
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderTerminate: () => {
+        // Pan responder terminated
+      },
       onPanResponderRelease: (_evt, gestureState) => {
-        // Cancel long press timer if it exists
-        if (longPressTimer) {
-          clearTimeout(longPressTimer);
-          setLongPressTimer(null);
+        // Check if long-press timer fired
+        const longPressFired = longPressFiredRef.current;
+        
+        // Clear long-press timer if it hasn't fired yet
+        if (longPressTimerRef.current) {
+          clearTimeout(longPressTimerRef.current);
+          longPressTimerRef.current = null;
         }
         
-        // Check if this was a tap (not a drag)
-        if (tapStart && Math.abs(gestureState.dx) < 5 && Math.abs(gestureState.dy) < 5) {
-          // It was a tap - check for double-click on pins
-          if (tapStart.type === 'pin' && tapStart.id) {
-            const currentTime = Date.now();
-            const timeSinceLastClick = currentTime - lastClickTime.time;
-            const isDoubleClick = timeSinceLastClick < 300 && lastClickTime.id === tapStart.id;
-            
-            if (isDoubleClick && onPinRemove) {
-              // Double-click detected - remove pin
-              console.log('🗑️ Double-click remove pin (native):', tapStart.id);
-              onPinRemove(tapStart.id);
-              setDebugInfo(`Removed pin ${tapStart.id}`);
-              setLastClickTime({ time: 0, id: null });
-            } else {
-              // Single click - trigger normal click handler
-              if (onPinClick) {
-                const pin = pins.find(p => p.id === tapStart.id);
-                if (pin) {
-                  onPinClick(tapStart.id, pin);
-                  setDebugInfo(`Clicked pin ${tapStart.id}`);
-                }
-              }
-              // Store this click for potential double-click detection
-              setLastClickTime({ time: currentTime, id: tapStart.id });
-            }
-          } else if (tapStart.type === 'waypoint' && !tapStart.id && onWaypointAdd && isAddingWaypoint) {
-            // Empty space tap - add waypoint only if in waypoint addition mode
-            const svgCoords = screenToSvg(tapStart.x, tapStart.y);
-            const fieldPos = svgToField(svgCoords.x, svgCoords.y);
-            onWaypointAdd(fieldPos);
-            setDebugInfo(`Added waypoint at (${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`);
+        // Reset flag for next interaction
+        longPressFiredRef.current = false;
+        
+        // Capture tapStart and dragStart before clearing them
+        const currentTapStart = tapStart;
+        const currentDragStart = dragStart;
+        
+        // Check if this was a tap (not a drag) - check both gesture movement AND actual element movement
+        const dx = Math.abs(gestureState.dx || 0);
+        const dy = Math.abs(gestureState.dy || 0);
+        
+        // Also check if the element actually moved from its original position
+        // Check BEFORE clearing state, using the ref which has the original position
+        let elementMoved = false;
+        const originalX = dragStartRef.current?.originalX;
+        const originalY = dragStartRef.current?.originalY;
+        
+        if (currentDragStart && originalX !== undefined && originalY !== undefined) {
+          const currentElement = currentDragStart.type === 'pin' 
+            ? pins.find(p => p.id === currentDragStart.id)
+            : currentDragStart.type === 'beam'
+            ? beams.find(b => b.id === currentDragStart.id)
+            : null;
+          
+          if (currentElement) {
+            const elementDx = Math.abs(currentElement.position.x - originalX);
+            const elementDy = Math.abs(currentElement.position.y - originalY);
+            // Element moved more than 0.5 field units (about 0.5 inches)
+            elementMoved = elementDx > 0.5 || elementDy > 0.5;
           }
         }
         
+        // Consider it a tap if gesture movement is small AND element didn't actually move
+        // Increased threshold for mobile devices (20px instead of 10px)
+        const isTap = (dx < 20 && dy < 20) && !elementMoved;
+        
+        console.log('📱 Release:', {
+          type: currentTapStart?.type,
+          id: currentTapStart?.id,
+          dx,
+          dy,
+          originalX,
+          originalY,
+          currentElementX: currentDragStart?.type === 'pin' 
+            ? pins.find(p => p.id === currentDragStart.id)?.position.x
+            : currentDragStart?.type === 'beam'
+            ? beams.find(b => b.id === currentDragStart.id)?.position.x
+            : undefined,
+          elementMoved,
+          isTap,
+          longPressFired,
+        });
+        
+        // Clear drag state first
         if (dragStart) {
           setDebugInfo(`Drag completed: ${dragStart.type} ${dragStart.id}`);
         }
         setDragStart(null);
+        dragStartRef.current = null; // Clear ref
         setDragState(null);
         setTapStart(null);
+        
+        // Handle tap/click after clearing state
+        // Also handle selection on drag release if element was dragged
+        if (currentTapStart && currentDragStart && !longPressFired) {
+          if (isTap) {
+            // Handle pin/beam tap (single click)
+            if (currentTapStart.type === 'pin' && currentTapStart.id) {
+              if (onPinClick) {
+                const pin = pins.find(p => p.id === currentTapStart.id);
+                if (pin) {
+                  console.log('👆 Pin clicked:', currentTapStart.id);
+                  onPinClick(currentTapStart.id, pin);
+                  setDebugInfo(`Selected pin ${currentTapStart.id}`);
+                }
+              }
+            } else if (currentTapStart.type === 'beam' && currentTapStart.id) {
+              if (onBeamClick) {
+                const beam = beams.find(b => b.id === currentTapStart.id);
+                if (beam) {
+                  console.log('👆 Beam clicked:', currentTapStart.id);
+                  onBeamClick(currentTapStart.id, beam);
+                  setDebugInfo(`Selected beam ${currentTapStart.id}`);
+                }
+              }
+            } else if (currentTapStart.type === 'waypoint' && !currentTapStart.id && onWaypointAdd && isAddingWaypoint) {
+              // Empty space tap - add waypoint only if in waypoint addition mode
+              const coords = screenToSvg(currentTapStart.x, currentTapStart.y);
+              const fieldPos = svgToField(coords.x, coords.y);
+              onWaypointAdd(fieldPos);
+              setDebugInfo(`Added waypoint at (${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`);
+            } else if (currentTapStart.type === 'waypoint' && !currentTapStart.id && !isAddingWaypoint) {
+              // Empty space tap (not in waypoint mode) - clear selection
+              if (onClearSelection) {
+                onClearSelection();
+                setDebugInfo('Selection cleared');
+              }
+            }
+          } else {
+            // It was a drag - select the element after dragging
+            if (currentTapStart.type === 'pin' && currentTapStart.id && onPinClick) {
+              const pin = pins.find(p => p.id === currentTapStart.id);
+              if (pin) {
+                console.log('👆 Pin selected after drag:', currentTapStart.id);
+                onPinClick(currentTapStart.id, pin);
+              }
+            } else if (currentTapStart.type === 'beam' && currentTapStart.id && onBeamClick) {
+              const beam = beams.find(b => b.id === currentTapStart.id);
+              if (beam) {
+                console.log('👆 Beam selected after drag:', currentTapStart.id);
+                onBeamClick(currentTapStart.id, beam);
+              }
+            }
+          }
+        }
       },
     });
-  }, [beams, pins, waypoints, onPinMove, onWaypointMove, onBeamMove, onPinClick, onPinRemove, onWaypointAdd, isAddingWaypoint, dragStart, tapStart, detectElementAtPosition, screenToSvg, svgToField, getCoordinatesFromEvent, lastClickTime, longPressTimer, findNearbyTarget]);
+  }, [beams, pins, waypoints, onPinMove, onWaypointMove, onBeamMove, onPinClick, onBeamClick, onPinLongPress, onPinRemove, onWaypointAdd, onClearSelection, isAddingWaypoint, dragStart, tapStart, detectElementAtPosition, screenToSvg, svgToField, getCoordinatesFromEvent, findNearbyTarget, pinSnapEnabled]);
 
   // Web-specific mouse/touch handlers (more reliable than PanResponder on web)
   // Works for both desktop (mouse) and mobile browsers (touch)
@@ -854,7 +1035,8 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
     
     // Snap pin to nearby pin or beam hole if close enough and stack not full
     if (dragStart.type === 'pin') {
-      const nearbyTarget = findNearbyTarget(fieldPos, dragStart.id);
+      const draggingPin = pins.find(p => p.id === dragStart.id);
+      const nearbyTarget = findNearbyTarget(fieldPos, dragStart.id, draggingPin);
       if (nearbyTarget) {
         if (nearbyTarget.pin) {
           // Snap to the nearby pin's position
@@ -871,15 +1053,14 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
     setDragState({ x: fieldPos.x, y: fieldPos.y, type: dragStart.type });
     const dragMsg = `${dragStart.type} ${dragStart.id}: screen(${x.toFixed(1)}, ${y.toFixed(1)}) -> field(${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`;
     setDebugInfo(dragMsg);
-    if (dragStart.type === 'beam') {
-      console.log('🔧 [DEBUG] Beam drag (web):', dragMsg);
-    }
     
     if (dragStart.type === 'pin' && onPinMove) {
+      console.log('📌 Pin moved:', dragStart.id, `to (${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`);
       onPinMove(dragStart.id, fieldPos);
     } else if (dragStart.type === 'waypoint') {
       onWaypointMove(dragStart.id, fieldPos);
     } else if (dragStart.type === 'beam' && onBeamMove) {
+      console.log('🔧 Beam moved:', dragStart.id, `to (${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`);
       onBeamMove(dragStart.id, fieldPos);
     }
     
@@ -887,69 +1068,75 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
     if (e.cancelable !== false) {
       e.preventDefault();
     }
-  }, [dragStart, screenToSvg, svgToField, onPinMove, onWaypointMove, onBeamMove, findNearbyTarget]);
+  }, [dragStart, screenToSvg, svgToField, onPinMove, onWaypointMove, onBeamMove, findNearbyTarget, pinSnapEnabled]);
 
   const handleWebMouseUp = useCallback((e: any) => {
     if (Platform.OS !== 'web') return;
     
-    if (tapStart && dragStart) {
-      // Check if this was a tap (not a drag)
-      const dx = Math.abs(dragStart.x - tapStart.x);
-      const dy = Math.abs(dragStart.y - tapStart.y);
-      
-      if (dx < 5 && dy < 5) {
-        // It was a tap - check for double-click on pins
-        if (tapStart.type === 'pin' && tapStart.id) {
-          const currentTime = Date.now();
-          const timeSinceLastClick = currentTime - lastClickTime.time;
-          const isDoubleClick = timeSinceLastClick < 300 && lastClickTime.id === tapStart.id;
-          
-          if (isDoubleClick && onPinRemove) {
-            // Double-click detected - remove pin
-            console.log('🗑️ Double-click remove pin:', tapStart.id);
-            onPinRemove(tapStart.id);
-            setDebugInfo(`Removed pin ${tapStart.id}`);
-            setLastClickTime({ time: 0, id: null });
-          } else {
-            // Single click - trigger normal click handler
-            if (onPinClick) {
-              const pin = pins.find(p => p.id === tapStart.id);
-              if (pin) {
-                onPinClick(tapStart.id, pin);
-                setDebugInfo(`Clicked pin ${tapStart.id}`);
-              }
-            }
-            // Store this click for potential double-click detection
-            setLastClickTime({ time: currentTime, id: tapStart.id });
-          }
-        } else if (tapStart.type === 'waypoint' && !tapStart.id && onWaypointAdd && isAddingWaypoint) {
-          // Empty space tap - add waypoint only if in waypoint addition mode
-          const svgElement = e.currentTarget?.querySelector('svg');
-          if (svgElement) {
-            const rect = svgElement.getBoundingClientRect();
-            const clientX = e.clientX || (e.changedTouches && e.changedTouches[0]?.clientX);
-            const clientY = e.clientY || (e.changedTouches && e.changedTouches[0]?.clientY);
-            
-            if (clientX !== undefined && clientY !== undefined) {
-              const x = clientX - rect.left;
-              const y = clientY - rect.top;
-              const svgCoords = screenToSvg(x, y);
-              const fieldPos = svgToField(svgCoords.x, svgCoords.y);
-              onWaypointAdd(fieldPos);
-              setDebugInfo(`Added waypoint at (${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`);
-            }
-          }
-        }
-      }
-    }
+    // Get current tapStart and dragStart before clearing them
+    const currentTapStart = tapStart;
+    const currentDragStart = dragStart;
     
+    // Clear drag state first
     if (dragStart) {
       setDebugInfo(`Drag completed: ${dragStart.type} ${dragStart.id}`);
     }
     setDragStart(null);
     setDragState(null);
     setTapStart(null);
-  }, [tapStart, dragStart, onPinClick, onPinRemove, onWaypointAdd, isAddingWaypoint, pins, screenToSvg, svgToField, lastClickTime, findNearbyTarget]);
+    
+    // Handle tap/click after clearing state
+    if (currentTapStart && currentDragStart) {
+      // Check if this was a tap (not a drag) - calculate movement from tapStart to current position
+      const rect = e.currentTarget?.querySelector('svg')?.getBoundingClientRect();
+      if (!rect) return;
+      
+      const clientX = e.clientX || (e.changedTouches && e.changedTouches[0]?.clientX);
+      const clientY = e.clientY || (e.changedTouches && e.changedTouches[0]?.clientY);
+      
+      if (clientX !== undefined && clientY !== undefined) {
+        const currentX = clientX - rect.left;
+        const currentY = clientY - rect.top;
+        const dx = Math.abs(currentX - currentTapStart.x);
+        const dy = Math.abs(currentY - currentTapStart.y);
+        
+        if (dx < 10 && dy < 10) {
+          // Handle pin/beam tap (single click)
+          if (currentTapStart.type === 'pin' && currentTapStart.id) {
+            if (onPinClick) {
+              const pin = pins.find(p => p.id === currentTapStart.id);
+              if (pin) {
+                console.log('👆 Pin clicked:', currentTapStart.id);
+                onPinClick(currentTapStart.id, pin);
+                setDebugInfo(`Selected pin ${currentTapStart.id}`);
+              }
+            }
+          } else if (currentTapStart.type === 'beam' && currentTapStart.id) {
+            if (onBeamClick) {
+              const beam = beams.find(b => b.id === currentTapStart.id);
+              if (beam) {
+                console.log('👆 Beam clicked:', currentTapStart.id);
+                onBeamClick(currentTapStart.id, beam);
+                setDebugInfo(`Selected beam ${currentTapStart.id}`);
+              }
+            }
+          } else if (currentTapStart.type === 'waypoint' && !currentTapStart.id && onWaypointAdd && isAddingWaypoint) {
+            // Empty space tap - add waypoint only if in waypoint addition mode
+            const coords = screenToSvg(currentTapStart.x, currentTapStart.y);
+            const fieldPos = svgToField(coords.x, coords.y);
+            onWaypointAdd(fieldPos);
+            setDebugInfo(`Added waypoint at (${fieldPos.x.toFixed(1)}, ${fieldPos.y.toFixed(1)})`);
+          } else if (currentTapStart.type === 'waypoint' && !currentTapStart.id && !isAddingWaypoint) {
+            // Empty space tap (not in waypoint mode) - clear selection
+            if (onClearSelection) {
+              onClearSelection();
+              setDebugInfo('Selection cleared');
+            }
+          }
+        }
+      }
+    }
+  }, [tapStart, dragStart, onPinClick, onBeamClick, onWaypointAdd, onClearSelection, isAddingWaypoint, pins, beams, screenToSvg, svgToField]);
 
 
   const getPinColor = (color: PinColor) => {
@@ -968,6 +1155,7 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
   return (
     <View 
       ref={containerRef}
+      onLayout={handleContainerLayout}
       style={[styles.container, containerStyle]}
       {...(Platform.OS === 'web' ? {
         onMouseDown: handleWebMouseDown,
@@ -1022,29 +1210,17 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
               const prev = waypoints[index - 1];
               const start = fieldToSvg(prev.position.x, prev.position.y);
               const end = fieldToSvg(waypoint.position.x, waypoint.position.y);
-              
-              // Calculate angle for arrow
               const dx = end.x - start.x;
               const dy = end.y - start.y;
               const angleRad = Math.atan2(dy, dx);
-              
-              // Arrow dimensions
               const arrowSize = 10;
-              const arrowOffset = 18; // Offset from end point to avoid overlap with waypoint circle
-              
-              // Calculate arrowhead position (slightly before the endpoint)
+              const arrowOffset = 18;
               const arrowX = end.x - Math.cos(angleRad) * arrowOffset;
               const arrowY = end.y - Math.sin(angleRad) * arrowOffset;
-              
-              // Arrow tip points toward the end waypoint
-              // Back points are behind the tip (toward the start)
               const backX = arrowX - Math.cos(angleRad) * arrowSize;
               const backY = arrowY - Math.sin(angleRad) * arrowSize;
-              
-              // Arrowhead wing points (30 degrees from center line)
               const wingAngle1 = angleRad + (150 * Math.PI / 180);
               const wingAngle2 = angleRad - (150 * Math.PI / 180);
-              
               const arrowPoint1 = {
                 x: backX + Math.cos(wingAngle1) * arrowSize,
                 y: backY + Math.sin(wingAngle1) * arrowSize,
@@ -1053,24 +1229,20 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
                 x: backX + Math.cos(wingAngle2) * arrowSize,
                 y: backY + Math.sin(wingAngle2) * arrowSize,
               };
-              
               return (
-                <G key={`path-${index}`}>
-                  {/* Subtle line connecting waypoints */}
+                <G key={`route-${index}`}>
                   <Line
                     x1={start.x}
                     y1={start.y}
-                    x2={arrowX}
-                    y2={arrowY}
-                    stroke="#000000"
-                    strokeWidth={2}
-                    opacity={0.4}
+                    x2={end.x}
+                    y2={end.y}
+                    stroke="#38bdf8"
+                    strokeWidth={4}
+                    strokeLinecap="round"
                   />
-                  {/* Single arrowhead at the tip */}
                   <Polygon
-                    points={`${arrowX},${arrowY} ${arrowPoint1.x},${arrowPoint1.y} ${arrowPoint2.x},${arrowPoint2.y}`}
-                    fill="#000000"
-                    opacity={0.6}
+                    points={`${end.x},${end.y} ${arrowPoint1.x},${arrowPoint1.y} ${arrowPoint2.x},${arrowPoint2.y}`}
+                    fill="#38bdf8"
                   />
                 </G>
               );
@@ -1111,94 +1283,9 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
           })}
         </G>
         
-        {/* Pins - rendered on top with stacking (only for pins at exact same position) */}
+        {/* Beams - rendered below pins */}
         <G>
-          {(() => {
-            const stacks = groupPinsIntoStacks();
-            const renderedPins = new Set<string>();
-            const pinElements: React.ReactNode[] = [];
-            
-            // Render stacked pins (only pins that were dragged together)
-            stacks.forEach((stackPins, _stackKey) => {
-              const basePin = stackPins[0];
-              const svgPos = fieldToSvg(basePin.position.x, basePin.position.y);
-              
-              // Render stacked pins with offset to show all colors
-              stackPins.forEach((pin, index) => {
-                renderedPins.add(pin.id);
-                const colors = getPinColor(pin.color);
-                const isDragging = dragStart?.id === pin.id && dragStart?.type === 'pin';
-                const isSelected = selectedPinId === pin.id;
-                
-                // Offset stacked pins slightly to show all colors
-                const offsetX = (index - (stackPins.length - 1) / 2) * PIN_STACK_OFFSET;
-                const offsetY = (index - (stackPins.length - 1) / 2) * PIN_STACK_OFFSET;
-                
-                pinElements.push(
-                  <G key={pin.id}>
-                    <Circle
-                      cx={svgPos.x + offsetX}
-                      cy={svgPos.y + offsetY}
-                      r={15}
-                      fill={colors.fill}
-                      stroke={isSelected ? '#000000' : colors.stroke}
-                      strokeWidth={isSelected ? 5 : 3}
-                      opacity={isDragging ? 0.85 : 0.9}
-                    />
-                    {Platform.OS === 'web' ? (
-                      <Rect
-                        x={svgPos.x - 15 + offsetX}
-                        y={svgPos.y - 15 + offsetY}
-                        width={30}
-                        height={30}
-                        fill="transparent"
-                      />
-                    ) : null}
-                  </G>
-                );
-              });
-            });
-            
-            // Render all pins not in stacks (normal rendering)
-            pins.forEach(pin => {
-              if (!renderedPins.has(pin.id)) {
-                const svgPos = fieldToSvg(pin.position.x, pin.position.y);
-                const colors = getPinColor(pin.color);
-                const isDragging = dragStart?.id === pin.id && dragStart?.type === 'pin';
-                const isSelected = selectedPinId === pin.id;
-                
-                pinElements.push(
-                  <G key={pin.id}>
-                    <Circle
-                      cx={svgPos.x}
-                      cy={svgPos.y}
-                      r={15}
-                      fill={colors.fill}
-                      stroke={isSelected ? '#000000' : colors.stroke}
-                      strokeWidth={isSelected ? 5 : 3}
-                      opacity={isDragging ? 0.85 : 1}
-                    />
-                    {Platform.OS === 'web' ? (
-                      <Rect
-                        x={svgPos.x - 15}
-                        y={svgPos.y - 15}
-                        width={30}
-                        height={30}
-                        fill="transparent"
-                      />
-                    ) : null}
-                  </G>
-                );
-              }
-            });
-            
-            return pinElements;
-          })()}
-        </G>
-        
-        {/* Beams - rendered on top of everything */}
-        <G>
-          {beams.map((beam) => {
+          {beams.filter(beam => beam.visible !== false).map((beam) => {
             const svgPos = fieldToSvg(beam.position.x, beam.position.y);
             const isDragging = dragStart?.id === beam.id && dragStart?.type === 'beam';
             const isSelected = selectedBeamId === beam.id;
@@ -1224,7 +1311,7 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
                   fill="#6c7173"
                   rx="18.75"
                   ry="18.75"
-                  stroke={isSelected ? '#000000' : 'none'}
+                  stroke={isSelected ? '#3b82f6' : 'none'}
                   strokeWidth={isSelected ? 5 : 0}
                 />
                 {/* Holes along the beam - centered (3 holes, 0.75x spacing) */}
@@ -1254,6 +1341,91 @@ export const InteractiveField: React.FC<InteractiveFieldProps> = ({
               </G>
             );
           })}
+        </G>
+        
+        {/* Pins - rendered on top with stacking (only for pins at exact same position) */}
+        <G>
+          {(() => {
+            const stacks = groupPinsIntoStacks();
+            const renderedPins = new Set<string>();
+            const pinElements: React.ReactNode[] = [];
+            
+            // Render stacked pins (only pins that were dragged together)
+            stacks.forEach((stackPins, _stackKey) => {
+              const basePin = stackPins[0];
+              const svgPos = fieldToSvg(basePin.position.x, basePin.position.y);
+              
+              // Render stacked pins with offset to show all colors (only visible pins)
+              stackPins.filter(pin => pin.visible !== false).forEach((pin, index) => {
+                renderedPins.add(pin.id);
+                const colors = getPinColor(pin.color);
+                const isDragging = dragStart?.id === pin.id && dragStart?.type === 'pin';
+                const isSelected = selectedPinId === pin.id;
+                
+                // Offset stacked pins slightly to show all colors
+                const offsetX = (index - (stackPins.length - 1) / 2) * PIN_STACK_OFFSET;
+                const offsetY = (index - (stackPins.length - 1) / 2) * PIN_STACK_OFFSET;
+                
+                pinElements.push(
+                  <G key={pin.id}>
+                    <Circle
+                      cx={svgPos.x + offsetX}
+                      cy={svgPos.y + offsetY}
+                      r={isSelected ? 18 : 15}
+                      fill={colors.fill}
+                      stroke={isSelected ? '#000000' : colors.stroke}
+                      strokeWidth={isSelected ? 5 : 3}
+                      opacity={isDragging ? 0.85 : 0.9}
+                    />
+                    {Platform.OS === 'web' ? (
+                      <Rect
+                        x={svgPos.x - (isSelected ? 18 : 15) + offsetX}
+                        y={svgPos.y - (isSelected ? 18 : 15) + offsetY}
+                        width={(isSelected ? 18 : 15) * 2}
+                        height={(isSelected ? 18 : 15) * 2}
+                        fill="transparent"
+                      />
+                    ) : null}
+                  </G>
+                );
+              });
+            });
+            
+            // Render all pins not in stacks (normal rendering) - only visible pins
+            pins.filter(pin => pin.visible !== false).forEach(pin => {
+              if (!renderedPins.has(pin.id)) {
+                const svgPos = fieldToSvg(pin.position.x, pin.position.y);
+                const colors = getPinColor(pin.color);
+                const isDragging = dragStart?.id === pin.id && dragStart?.type === 'pin';
+                const isSelected = selectedPinId === pin.id;
+                
+                pinElements.push(
+                  <G key={pin.id}>
+                    <Circle
+                      cx={svgPos.x}
+                      cy={svgPos.y}
+                      r={isSelected ? 18 : 15}
+                      fill={colors.fill}
+                      stroke={isSelected ? '#000000' : colors.stroke}
+                      strokeWidth={isSelected ? 5 : 3}
+                      opacity={isDragging ? 0.85 : 1}
+                    />
+                    {Platform.OS === 'web' ? (
+                      <Rect
+                        x={svgPos.x - (isSelected ? 18 : 15)}
+                        y={svgPos.y - (isSelected ? 18 : 15)}
+                        width={(isSelected ? 18 : 15) * 2}
+                        height={(isSelected ? 18 : 15) * 2}
+                        fill="transparent"
+                      />
+                    ) : null}
+                  </G>
+                );
+              }
+            });
+            
+            return pinElements;
+          })()}
         </G>
       </Svg>
     </View>
@@ -1294,3 +1466,9 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'web' ? 'monospace' : 'monospace',
   },
 });
+
+
+
+
+
+

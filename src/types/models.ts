@@ -52,6 +52,8 @@ export interface Pin {
   id: string;
   position: FieldPosition;
   color: PinColor;
+  snappable?: boolean; // Whether this pin can snap to other pins (defaults to true)
+  visible?: boolean; // Whether this pin is visible (defaults to true)
 }
 
 /**
@@ -61,6 +63,8 @@ export interface Beam {
   id: string;
   position: FieldPosition;
   rotation?: number; // degrees (0-360) for orientation
+  snappable?: boolean; // Whether pins can snap to this beam's holes (defaults to true)
+  visible?: boolean; // Whether this beam is visible (defaults to true)
 }
 
 /**
@@ -179,12 +183,16 @@ export const PinSchema = z.object({
   id: z.string(),
   position: FieldPositionSchema,
   color: z.nativeEnum(PinColor),
+  snappable: z.boolean().optional(),
+  visible: z.boolean().optional(),
 });
 
 export const BeamSchema = z.object({
   id: z.string(),
   position: FieldPositionSchema,
   rotation: z.number().optional(),
+  snappable: z.boolean().optional(),
+  visible: z.boolean().optional(),
 });
 
 export const FieldLayoutSchema = z.object({
