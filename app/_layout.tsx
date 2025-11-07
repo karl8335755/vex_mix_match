@@ -2,11 +2,40 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Platform } from 'react-native';
 import { useEffect } from 'react';
+import { usePathname, useRouter } from 'expo-router';
+
+import { Stack } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import { Platform } from 'react-native';
+import { useEffect } from 'react';
+import { usePathname, useRouter } from 'expo-router';
 
 export default function RootLayout() {
+  const pathname = usePathname();
+  const router = useRouter();
+  
+  // Web-specific: Handle base path for GitHub Pages
+  // Expo Router should handle basePath automatically, but if it doesn't match,
+  // force redirect to root route
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      const basePath = '/vex_mix_match';
+      const currentPath = window.location.pathname;
+      
+      // If we're at the base path and router shows unmatched route,
+      // redirect to root route
+      if ((currentPath === basePath || currentPath === basePath + '/') && pathname === null) {
+        // Router hasn't matched - force redirect to root
+        router.replace('/');
+      }
+    }
+  }, [pathname, router]);
+  
   // Web-specific: Catch className.split errors from React Native Web
-  // Note: Base path redirect is handled by the script in index.html before React loads
-  // This prevents hydration errors
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+  
+  // Web-specific: Catch className.split errors from React Native Web
   useEffect(() => {
     if (Platform.OS === 'web') {
       const originalErrorHandler = window.onerror;
